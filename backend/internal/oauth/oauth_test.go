@@ -1,11 +1,17 @@
 package oauth
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGeneratePKCE(t *testing.T) {
@@ -49,6 +55,165 @@ func TestConfigFor(t *testing.T) {
 	}
 	if _, ok := ConfigFor("does-not-exist"); ok {
 		t.Error("expected no config for unknown provider")
+	}
+}
+
+// TestGrokCLIConfigShape locks Grok Build device-code OAuth (not xai PKCE).
+// Note: farm refresh scripts also send scope+redirect_uri; generic Refresh omits
+// them unless ExtraTokenParams/refresh body is extended later.
+func TestGrokCLIConfigShape(t *testing.T) {
+	cfg, ok := ConfigFor("grok-cli")
+	if !ok {
+		t.Fatal("expected OAuth config for grok-cli")
+	}
+	if cfg.Flow != FlowDeviceCode {
+		t.Fatalf("grok-cli flow: got %q want %q", cfg.Flow, FlowDeviceCode)
+	}
+	if cfg.ClientID != "b1a00492-073a-47ea-816f-4c329264a828" {
+		t.Fatalf("grok-cli ClientID: got %q", cfg.ClientID)
+	}
+	if cfg.DeviceCodeURL != "https://auth.x.ai/oauth2/device/code" {
+		t.Fatalf("grok-cli DeviceCodeURL: got %q", cfg.DeviceCodeURL)
+	}
+	if cfg.TokenURL != "https://auth.x.ai/oauth2/token" {
+		t.Fatalf("grok-cli TokenURL: got %q", cfg.TokenURL)
+	}
+	if cfg.ExtraDeviceParams["referrer"] != "grok-build" {
+		t.Fatalf("grok-cli ExtraDeviceParams referrer: got %#v", cfg.ExtraDeviceParams)
+	}
+	if cfg.UserAgent != "grok-shell/0.2.99 (linux; x86_64)" {
+		t.Fatalf("grok-cli UserAgent: got %q", cfg.UserAgent)
+	}
+	if cfg.RefreshLead != 10*time.Minute {
+		t.Fatalf("grok-cli RefreshLead: got %v want 10m", cfg.RefreshLead)
+	}
+	scopeJoin := strings.Join(cfg.Scopes, " ")
+	for _, want := range []string{"conversations:read", "conversations:write", "grok-cli:access", "offline_access"} {
+		if !strings.Contains(scopeJoin, want) {
+			t.Errorf("grok-cli scopes missing %q; got %q", want, scopeJoin)
+		}
+	}
+}
+
+func TestXAIConfigUntouched(t *testing.T) {
+	cfg, ok := ConfigFor("xai")
+	if !ok {
+		t.Fatal("expected OAuth config for xai")
+	}
+	if cfg.Flow != FlowAuthCodePKCE {
+		t.Fatalf("xai must remain FlowAuthCodePKCE, got %q", cfg.Flow)
+	}
+	if cfg.DeviceCodeURL != "" {
+		t.Fatalf("xai must not have DeviceCodeURL, got %q", cfg.DeviceCodeURL)
+	}
+	if cfg.ExtraDeviceParams != nil {
+		t.Fatalf("xai must not set ExtraDeviceParams, got %#v", cfg.ExtraDeviceParams)
+	}
+	// xai scopes intentionally omit conversation scopes (grok-cli only).
+	for _, s := range cfg.Scopes {
+		if s == "conversations:write" || s == "conversations:read" {
+			t.Fatalf("xai scopes must not include conversation scopes, got %v", cfg.Scopes)
+		}
+	}
+}
+
+// testJWT builds an unsigned JWT with the given JSON payload (header+sig ignored by decodeJWTPayload).
+func testJWT(payload map[string]any) string {
+	raw, _ := json.Marshal(payload)
+	return "eyJhbGciOiJub25lIn0." + base64.RawURLEncoding.EncodeToString(raw) + ".sig"
+}
+
+func TestGrokCLIApplyTokenMetadataEmailFromIDToken(t *testing.T) {
+	cfg, ok := ConfigFor("grok-cli")
+	if !ok {
+		t.Fatal("expected OAuth config for grok-cli")
+	}
+	tokens := &Tokens{
+		AccessToken: "at",
+		IDToken:     testJWT(map[string]any{"email": "user@x.ai", "sub": "sub-1"}),
+	}
+	cfg.applyTokenMetadata(tokens)
+	if tokens.Email != "user@x.ai" {
+		t.Fatalf("Email: got %q want user@x.ai", tokens.Email)
+	}
+	if tokens.Extra["email"] != "user@x.ai" {
+		t.Fatalf("Extra[email]: got %#v", tokens.Extra)
+	}
+}
+
+func TestGrokCLIFetchUserInfoBestEffortFailure(t *testing.T) {
+	// /user 500 must not clear tokens or fail the OAuth mapping path.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"boom"}`))
+	}))
+	defer srv.Close()
+
+	prev := grokCLIUserURL
+	grokCLIUserURL = srv.URL
+	defer func() { grokCLIUserURL = prev }()
+
+	cfg, _ := ConfigFor("grok-cli")
+	tokens := &Tokens{
+		AccessToken:  "at",
+		RefreshToken: "rt",
+		Email:        "keep@x.ai",
+		Extra:        map[string]string{"email": "keep@x.ai"},
+	}
+	cfg.FetchUserInfo(context.Background(), tokens)
+	if tokens.AccessToken != "at" || tokens.RefreshToken != "rt" {
+		t.Fatalf("tokens mutated on /user failure: %+v", tokens)
+	}
+	if tokens.Email != "keep@x.ai" {
+		t.Fatalf("Email cleared on /user failure: %q", tokens.Email)
+	}
+	if tokens.Extra["email"] != "keep@x.ai" {
+		t.Fatalf("Extra email cleared: %#v", tokens.Extra)
+	}
+	if tokens.Extra["userId"] != "" {
+		t.Fatalf("unexpected userId after failed /user: %#v", tokens.Extra)
+	}
+}
+
+func TestGrokCLIFetchUserInfoStoresUserID(t *testing.T) {
+	var gotAuth, gotUA, gotTokenAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotUA = r.Header.Get("User-Agent")
+		gotTokenAuth = r.Header.Get("x-xai-token-auth")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"email":"u@x.ai","userId":"uid-99","name":"Grok User"}`))
+	}))
+	defer srv.Close()
+
+	prev := grokCLIUserURL
+	grokCLIUserURL = srv.URL
+	defer func() { grokCLIUserURL = prev }()
+
+	cfg, _ := ConfigFor("grok-cli")
+	tokens := &Tokens{AccessToken: "secret-at"}
+	cfg.FetchUserInfo(context.Background(), tokens)
+
+	if gotAuth != "Bearer secret-at" {
+		t.Errorf("Authorization: got %q", gotAuth)
+	}
+	if gotUA != grokCLIUserAgent {
+		t.Errorf("User-Agent: got %q", gotUA)
+	}
+	if gotTokenAuth != grokCLITokenAuth {
+		t.Errorf("x-xai-token-auth: got %q", gotTokenAuth)
+	}
+	if tokens.Email != "u@x.ai" {
+		t.Fatalf("Email: got %q", tokens.Email)
+	}
+	if tokens.Extra["userId"] != "uid-99" {
+		t.Fatalf("Extra userId: got %#v", tokens.Extra)
+	}
+	if tokens.Extra["email"] != "u@x.ai" {
+		t.Fatalf("Extra email: got %#v", tokens.Extra)
+	}
+	if tokens.DisplayName != "Grok User" {
+		t.Fatalf("DisplayName: got %q", tokens.DisplayName)
 	}
 }
 
@@ -189,5 +354,146 @@ func TestSessionStore(t *testing.T) {
 	s.Delete("k1")
 	if _, ok := s.Get("k1"); ok {
 		t.Fatal("expected session deleted")
+	}
+}
+
+func TestRequestDeviceCodeExtraDeviceParams(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"device_code":"dc","user_code":"UC","verification_uri":"https://example.com","expires_in":600,"interval":5}`))
+	}))
+	defer srv.Close()
+
+	cfg := ProviderConfig{
+		ClientID:        "client-1",
+		DeviceCodeURL:   srv.URL,
+		Scopes:          []string{"api:access"},
+		ExtraDeviceParams: map[string]string{"referrer": "grok-build"},
+	}
+	dc, err := cfg.RequestDeviceCode(context.Background(), "")
+	if err != nil {
+		t.Fatalf("RequestDeviceCode: %v", err)
+	}
+	if dc.DeviceCode != "dc" {
+		t.Fatalf("device_code: got %q", dc.DeviceCode)
+	}
+	form, err := url.ParseQuery(gotBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if form.Get("client_id") != "client-1" {
+		t.Errorf("client_id: got %q", form.Get("client_id"))
+	}
+	if form.Get("scope") != "api:access" {
+		t.Errorf("scope: got %q", form.Get("scope"))
+	}
+	if form.Get("referrer") != "grok-build" {
+		t.Errorf("referrer: got %q want grok-build", form.Get("referrer"))
+	}
+}
+
+// TestGrokCLIRequestDeviceCodeSendsReferrer locks the real grok-cli ProviderConfig
+// (ConfigFor) through RequestDeviceCode so ExtraDeviceParams.referrer reaches the form.
+func TestGrokCLIRequestDeviceCodeSendsReferrer(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"device_code":"dc","user_code":"UC","verification_uri":"https://example.com","expires_in":600,"interval":5}`))
+	}))
+	defer srv.Close()
+
+	cfg, ok := ConfigFor("grok-cli")
+	if !ok {
+		t.Fatal("expected OAuth config for grok-cli")
+	}
+	cfg.DeviceCodeURL = srv.URL
+	if _, err := cfg.RequestDeviceCode(context.Background(), ""); err != nil {
+		t.Fatalf("RequestDeviceCode: %v", err)
+	}
+	form, err := url.ParseQuery(gotBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if form.Get("referrer") != "grok-build" {
+		t.Errorf("referrer: got %q want grok-build; body=%q", form.Get("referrer"), gotBody)
+	}
+	if form.Get("client_id") != cfg.ClientID {
+		t.Errorf("client_id: got %q want %q", form.Get("client_id"), cfg.ClientID)
+	}
+	if form.Get("scope") != strings.Join(cfg.Scopes, " ") {
+		t.Errorf("scope: got %q want %q", form.Get("scope"), strings.Join(cfg.Scopes, " "))
+	}
+}
+
+func TestRequestDeviceCodeNilExtraDeviceParams(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"device_code":"dc","user_code":"UC","verification_uri":"https://example.com","expires_in":600,"interval":5}`))
+	}))
+	defer srv.Close()
+
+	// github/qwen-style configs leave ExtraDeviceParams nil.
+	cfg := ProviderConfig{
+		ClientID:      "github-client",
+		DeviceCodeURL: srv.URL,
+		Scopes:        []string{"read:user"},
+	}
+	if _, err := cfg.RequestDeviceCode(context.Background(), ""); err != nil {
+		t.Fatalf("RequestDeviceCode: %v", err)
+	}
+	form, err := url.ParseQuery(gotBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if form.Get("client_id") != "github-client" {
+		t.Errorf("client_id: got %q", form.Get("client_id"))
+	}
+	if _, ok := form["referrer"]; ok {
+		t.Errorf("unexpected referrer key in form: %v", form)
+	}
+	if len(form) != 2 {
+		t.Errorf("expected only client_id+scope, got %v", form)
+	}
+}
+
+func TestRequestDeviceCodePKCEStillPresent(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"device_code":"dc","user_code":"UC","verification_uri":"https://example.com","expires_in":600,"interval":5}`))
+	}))
+	defer srv.Close()
+
+	cfg := ProviderConfig{
+		ClientID:      "qwen-client",
+		DeviceCodeURL: srv.URL,
+		Scopes:        []string{"openid"},
+		// ExtraDeviceParams nil — must not break DeviceCodePKCE fields.
+	}
+	if _, err := cfg.RequestDeviceCode(context.Background(), "challenge-xyz"); err != nil {
+		t.Fatalf("RequestDeviceCode: %v", err)
+	}
+	form, err := url.ParseQuery(gotBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if form.Get("code_challenge") != "challenge-xyz" {
+		t.Errorf("code_challenge: got %q", form.Get("code_challenge"))
+	}
+	if form.Get("code_challenge_method") != "S256" {
+		t.Errorf("code_challenge_method: got %q", form.Get("code_challenge_method"))
+	}
+	if _, ok := form["referrer"]; ok {
+		t.Errorf("unexpected referrer with nil ExtraDeviceParams: %v", form)
 	}
 }

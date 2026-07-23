@@ -76,8 +76,17 @@ func (k *KeepAlive) refreshAll(ctx context.Context) {
 		return
 	}
 
-	var refreshed, skipped, failed, reconnect int
+	// Cap work per pass. Farm imports (thousands of OAuth rows) would otherwise
+	// serial-refresh every expired token on startup and freeze the gateway.
+	const maxRefreshPerPass = 32
+
+	var refreshed, skipped, failed, reconnect, deferred int
 	for _, acc := range accs {
+		if refreshed+failed >= maxRefreshPerPass {
+			// Leave the rest for later passes / request-time EnsureFresh.
+			deferred++
+			continue
+		}
 		if acc.AuthKind != store.AuthOAuth {
 			continue
 		}
@@ -89,10 +98,22 @@ func (k *KeepAlive) refreshAll(ctx context.Context) {
 			reconnect++
 			continue
 		}
-		// Only refresh tokens that are near expiry or expired.
-		if acc.TokenExpiresAt != nil && time.Until(*acc.TokenExpiresAt) > refreshSkew {
-			skipped++
-			continue
+		// Only refresh tokens that are near expiry or recently expired.
+		// Lead is per-provider (RefreshLead) or global refreshSkew when unset.
+		// Long-expired farm tokens are skipped here — request path refreshes
+		// only the few accounts actually selected for a chat attempt.
+		if acc.TokenExpiresAt != nil {
+			remaining := time.Until(*acc.TokenExpiresAt)
+			lead := providerRefreshLead(acc.Provider)
+			if remaining > lead {
+				skipped++
+				continue
+			}
+			// Expired more than 1h ago: do not thrash the token endpoint on keepalive.
+			if remaining < -time.Hour {
+				skipped++
+				continue
+			}
 		}
 
 		_, err := k.tokenMgr.EnsureFresh(ctx, acc)
@@ -112,12 +133,13 @@ func (k *KeepAlive) refreshAll(ctx context.Context) {
 		)
 	}
 
-	if refreshed > 0 || failed > 0 || reconnect > 0 {
+	if refreshed > 0 || failed > 0 || reconnect > 0 || deferred > 0 {
 		k.log.Info("oauth keepalive pass complete",
 			"refreshed", refreshed,
 			"skipped", skipped,
 			"failed", failed,
 			"needs_reconnect", reconnect,
+			"deferred", deferred,
 		)
 	}
 }

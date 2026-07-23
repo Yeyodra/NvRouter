@@ -1,5 +1,7 @@
 package oauth
 
+import "time"
+
 // ProviderConfig holds the OAuth endpoints and client identity for one
 // provider. It covers the
 // providers KeiRouter can drive with the standard authorization-code and
@@ -42,6 +44,16 @@ type ProviderConfig struct {
 	// ExtraTokenParams are added to the token exchange request body
 	// (provider quirks, e.g. Cline requires client_type=extension).
 	ExtraTokenParams map[string]string
+	// ExtraDeviceParams are added to the device-code request body
+	// (provider quirks, e.g. Grok CLI requires referrer=grok-build).
+	ExtraDeviceParams map[string]string
+	// RefreshLead is how long before TokenExpiresAt we treat a token as
+	// needing refresh. Zero means use the global refreshSkew (60s).
+	// Long-lived tokens (e.g. grok-cli ~6h from expires_in) should set a
+	// larger lead — farm EXPIRY_BUFFER is 10*time.Minute — so keepalive and
+	// EnsureFresh renew before idle gaps miss the window. Do not hardcode
+	// token lifetime here; always trust expires_in from the token endpoint.
+	RefreshLead time.Duration
 	// DeviceCodePKCE enables PKCE for device-code flows (e.g. Qwen requires
 	// code_challenge + code_challenge_method on the device-code request).
 	DeviceCodePKCE bool
@@ -73,6 +85,25 @@ func (c ProviderConfig) refreshURL() string {
 		return c.RefreshURL
 	}
 	return c.TokenURL
+}
+
+// refreshLead returns how long before expiry a token should be refreshed.
+// When RefreshLead > 0 it is used (e.g. grok-cli: 10*time.Minute); otherwise
+// the global refreshSkew (60s) applies.
+func (c ProviderConfig) refreshLead() time.Duration {
+	if c.RefreshLead > 0 {
+		return c.RefreshLead
+	}
+	return refreshSkew
+}
+
+// providerRefreshLead resolves the refresh lead for a provider id. Unknown
+// providers fall back to the global refreshSkew.
+func providerRefreshLead(provider string) time.Duration {
+	if cfg, ok := ConfigFor(provider); ok {
+		return cfg.refreshLead()
+	}
+	return refreshSkew
 }
 
 // configs maps provider id -> OAuth config. Client ids/secrets are the public
@@ -169,6 +200,23 @@ var configs = map[string]ProviderConfig{
 		DeviceCodePKCE:   true,
 		UserAgent:        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
 		ClientDeviceCode: true,
+	},
+	// grok-cli is Grok Build device-code OAuth (distinct from xai PKCE on api.x.ai).
+	// Same ClientID as xai; device endpoint + referrer=grok-build + conversation scopes.
+	"grok-cli": {
+		Provider:      "grok-cli",
+		Flow:          FlowDeviceCode,
+		ClientID:      "b1a00492-073a-47ea-816f-4c329264a828",
+		DeviceCodeURL: "https://auth.x.ai/oauth2/device/code",
+		TokenURL:      "https://auth.x.ai/oauth2/token",
+		Scopes: []string{
+			"openid", "profile", "email", "offline_access",
+			"grok-cli:access", "api:access",
+			"conversations:read", "conversations:write",
+		},
+		ExtraDeviceParams: map[string]string{"referrer": "grok-build"},
+		UserAgent:         "grok-shell/0.2.99 (linux; x86_64)",
+		RefreshLead:       10 * time.Minute,
 	},
 	"cline": {
 		Provider:               "cline",

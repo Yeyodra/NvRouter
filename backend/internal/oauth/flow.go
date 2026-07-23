@@ -322,6 +322,10 @@ func (c ProviderConfig) RequestDeviceCode(ctx context.Context, challenge string)
 		form.Set("code_challenge", challenge)
 		form.Set("code_challenge_method", "S256")
 	}
+	// Provider-specific device-code params (e.g. Grok's referrer).
+	for k, v := range c.ExtraDeviceParams {
+		form.Set(k, v)
+	}
 
 	raw, err := c.tokenRequest(ctx, c.DeviceCodeURL, form)
 	if err != nil {
@@ -478,6 +482,16 @@ func (c ProviderConfig) applyTokenMetadata(t *Tokens) {
 				t.Email = email
 			}
 		}
+	case "grok-cli":
+		// Email from id_token; userId comes best-effort from FetchUserInfo (/v1/user).
+		if t.Email == "" {
+			if email, _ := payload["email"].(string); email != "" {
+				t.Email = email
+			}
+		}
+		if t.Email != "" {
+			t.Extra["email"] = t.Email
+		}
 	}
 
 	if len(t.Extra) == 0 {
@@ -598,7 +612,15 @@ func mapTokenResponse(raw []byte) (*Tokens, error) {
 // Tokens.Email and Tokens.DisplayName.  Errors are logged but not fatal — the
 // account is still usable, just missing a human-readable label.
 func (c ProviderConfig) FetchUserInfo(ctx context.Context, t *Tokens) {
-	if c.UserInfoURL == "" || t.AccessToken == "" {
+	if t == nil || t.AccessToken == "" {
+		return
+	}
+	// Grok Build: profile lives on cli-chat-proxy, not auth.x.ai OIDC userinfo.
+	if c.Provider == "grok-cli" {
+		fetchGrokCLIUser(ctx, t)
+		return
+	}
+	if c.UserInfoURL == "" {
 		return
 	}
 
@@ -651,6 +673,105 @@ func (c ProviderConfig) FetchUserInfo(ctx context.Context, t *Tokens) {
 			t.DisplayName = info.PreferredUser
 		}
 	}
+}
+
+// Grok CLI probe fingerprint (mirrors connectors/grok_cli validate headers).
+// ponytail: pin with connector constants; bump together when CLI version changes.
+const (
+	grokCLIUserAgent  = "grok-shell/0.2.99 (linux; x86_64)"
+	grokCLIVersion    = "0.2.99"
+	grokCLIIdentifier = "grok-shell"
+	grokCLITokenAuth  = "xai-grok-cli"
+)
+
+// grokCLIUserURL is package-level so tests can point at httptest.
+var grokCLIUserURL = "https://cli-chat-proxy.grok.com/v1/user"
+
+// fetchGrokCLIUser best-effort loads email/userId from cli-chat-proxy.
+// Failures are ignored so OAuth still completes.
+func fetchGrokCLIUser(ctx context.Context, t *Tokens) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, grokCLIUserURL, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+t.AccessToken)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", grokCLIUserAgent)
+	req.Header.Set("x-xai-token-auth", grokCLITokenAuth)
+	req.Header.Set("x-grok-client-version", grokCLIVersion)
+	req.Header.Set("x-grok-client-identifier", grokCLIIdentifier)
+	req.Header.Set("x-grok-client-mode", "headless")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return
+	}
+
+	var root map[string]any
+	if err := json.Unmarshal(body, &root); err != nil || root == nil {
+		return
+	}
+	// Some envelopes nest under user / data.
+	user := root
+	if nested, ok := root["user"].(map[string]any); ok && nested != nil {
+		user = nested
+	} else if nested, ok := root["data"].(map[string]any); ok && nested != nil {
+		user = nested
+	}
+
+	if t.Extra == nil {
+		t.Extra = map[string]string{}
+	}
+	if email := stringField(user, "email"); email != "" {
+		if t.Email == "" {
+			t.Email = email
+		}
+		t.Extra["email"] = email
+	}
+	if name := firstStringField(user, "name", "display_name", "displayName"); name != "" && t.DisplayName == "" {
+		t.DisplayName = name
+	}
+	if userID := firstStringField(user, "userId", "userid", "user_id", "id", "sub"); userID != "" {
+		t.Extra["userId"] = userID
+	}
+	if len(t.Extra) == 0 {
+		t.Extra = nil
+	}
+}
+
+func stringField(m map[string]any, key string) string {
+	if m == nil {
+		return ""
+	}
+	switch v := m[key].(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case float64:
+		// JSON numbers (rare for ids) → decimal string without trailing .0 when whole.
+		if v == float64(int64(v)) {
+			return fmt.Sprintf("%d", int64(v))
+		}
+		return strings.TrimSpace(fmt.Sprintf("%v", v))
+	default:
+		return ""
+	}
+}
+
+func firstStringField(m map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if s := stringField(m, k); s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 func truncate(b []byte, max int) string {

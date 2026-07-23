@@ -66,7 +66,7 @@ func (m *TokenManager) EnsureFresh(ctx context.Context, acc store.Account) (stor
 	if acc.AuthKind != store.AuthOAuth || acc.TokenExpiresAt == nil {
 		return acc, nil
 	}
-	if time.Until(*acc.TokenExpiresAt) > refreshSkew {
+	if time.Until(*acc.TokenExpiresAt) > providerRefreshLead(acc.Provider) {
 		return acc, nil // still valid
 	}
 
