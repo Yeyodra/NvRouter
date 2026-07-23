@@ -1368,10 +1368,22 @@ export const api = {
   modelUsage: (period: string) =>
     request<ModelUsageResponse>("GET", `/usage/models?period=${period}&tz=${browserTZ()}`),
 
+  // Quota list may probe dozens of upstream accounts concurrently; 20s default
+  // admin timeout aborts mid-probe and the page looks stuck in loading.
   quota: (period: string) =>
-    request<{ accounts: QuotaAccount[]; since: string }>("GET", `/quota?period=${period}&tz=${browserTZ()}`),
+    request<{ accounts: QuotaAccount[]; since: string }>(
+      "GET",
+      `/quota?period=${period}&tz=${browserTZ()}`,
+      undefined,
+      90_000,
+    ),
   quotaByProvider: (provider: string) =>
-    request<{ accounts: QuotaAccount[]; since: string }>("GET", `/quota?period=today&tz=${browserTZ()}&provider=${provider}`),
+    request<{ accounts: QuotaAccount[]; since: string }>(
+      "GET",
+      `/quota?period=today&tz=${browserTZ()}&provider=${provider}`,
+      undefined,
+      90_000,
+    ),
 
   consoleLog: () => request<{ logs: ConsoleLogEntry[] }>("GET", "/console"),
 
