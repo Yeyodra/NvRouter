@@ -266,6 +266,31 @@ func (p *Pipeline) Chat(ctx context.Context, req *core.ChatRequest, opts Options
 		started := time.Now()
 		p.log.Debug("attempt start", "i", i, "provider", attempt.Target.Provider,
 			"model", attempt.Target.Model, "account", attempt.Account.ID)
+		// 9router parity: refresh OAuth only for the account about to be used.
+		prepared, prepErr := p.dispatcher.PrepareAttempt(ctx, attempt)
+		if prepErr != nil {
+			pe := core.AsProviderError(prepErr)
+			lastErr = pe
+			p.dispatcher.NoteFailure(ctx, attempt.Account.ID, pe)
+			p.recordFailureTelemetry(req.Metadata, attempt, pe, time.Since(started), pe.Fallbackable())
+			if !pe.Fallbackable() {
+				pe, cost := p.recordAttemptTerminal(ctx, req.Metadata, attempt, pe, core.Usage{},
+					time.Since(started), time.Since(requestStarted), 0, nil, fellBack)
+				p.budgetConfirm(scope, cost)
+				return nil, pe
+			}
+			fellBack = true
+			nextAttempt, ok := planner.AfterFailure(ctx, attempt, pe)
+			if !ok {
+				break
+			}
+			attempt = nextAttempt
+			hasAttempt = true
+			continue
+		}
+		attempt = prepared
+		lastAttempt = attempt
+
 		attemptReq := cloneForAttempt(attemptBaseReq, attempt.Target.Model)
 
 		// Soft-degrade unsupported modalities. Stripping replaces input
@@ -616,10 +641,31 @@ func (p *Pipeline) streamExec(ctx context.Context, req *core.ChatRequest, opts O
 	attempt, hasAttempt := planner.Current()
 	for i := 0; hasAttempt; i++ {
 		lastAttempt = attempt
-		attemptReq := cloneForAttempt(req, attempt.Target.Model)
 		started := time.Now()
 		p.log.Debug("stream attempt start", "i", i, "provider", attempt.Target.Provider,
 			"model", attempt.Target.Model, "account", attempt.Account.ID)
+
+		// 9router parity: refresh only the account about to stream.
+		prepared, prepErr := p.dispatcher.PrepareAttempt(ctx, attempt)
+		if prepErr != nil {
+			pe := core.AsProviderError(prepErr)
+			lastErr = pe
+			p.dispatcher.NoteFailure(ctx, attempt.Account.ID, pe)
+			attemptLatency := time.Since(started)
+			lastLatency = attemptLatency
+			p.recordFailureTelemetry(req.Metadata, attempt, pe, attemptLatency, pe.Fallbackable())
+			if !pe.Fallbackable() {
+				release(0)
+				p.budgetRelease(scope)
+				return nil, pe, true, attempt, attemptLatency, fellBack
+			}
+			fellBack = true
+			continue
+		}
+		attempt = prepared
+		lastAttempt = attempt
+
+		attemptReq := cloneForAttempt(req, attempt.Target.Model)
 
 		// Soft-degrade unsupported modalities. Stripping replaces input
 		// modalities the resolved profile cannot handle with text placeholders,

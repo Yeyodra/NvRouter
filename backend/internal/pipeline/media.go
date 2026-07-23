@@ -89,6 +89,15 @@ func (p *Pipeline) Embeddings(ctx context.Context, req *core.EmbeddingRequest, o
 	defer release(0)
 	var lastErr error
 	for _, a := range attempts {
+		prepared, prepErr := p.prepareMediaAttempt(ctx, a)
+		if prepErr != nil {
+			if !p.noteMediaFailure(ctx, a, prepErr) {
+				return nil, "", prepErr
+			}
+			lastErr = prepErr
+			continue
+		}
+		a = prepared
 		conn, ok := a.Conn.(core.MediaConnector)
 		if !ok {
 			lastErr = unsupported(a.Target.Provider, "embeddings")
@@ -123,6 +132,15 @@ func (p *Pipeline) GenerateImage(ctx context.Context, req *core.ImageRequest, op
 	defer release(0)
 	var lastErr error
 	for _, a := range attempts {
+		prepared, prepErr := p.prepareMediaAttempt(ctx, a)
+		if prepErr != nil {
+			if !p.noteMediaFailure(ctx, a, prepErr) {
+				return nil, "", prepErr
+			}
+			lastErr = prepErr
+			continue
+		}
+		a = prepared
 		conn, ok := a.Conn.(core.ImageConnector)
 		if !ok {
 			lastErr = unsupported(a.Target.Provider, "image generation")
@@ -157,6 +175,15 @@ func (p *Pipeline) Transcribe(ctx context.Context, req *core.TranscriptionReques
 	defer release(0)
 	var lastErr error
 	for _, a := range attempts {
+		prepared, prepErr := p.prepareMediaAttempt(ctx, a)
+		if prepErr != nil {
+			if !p.noteMediaFailure(ctx, a, prepErr) {
+				return nil, "", prepErr
+			}
+			lastErr = prepErr
+			continue
+		}
+		a = prepared
 		conn, ok := a.Conn.(core.TranscriptionConnector)
 		if !ok {
 			lastErr = unsupported(a.Target.Provider, "transcription")
@@ -191,6 +218,15 @@ func (p *Pipeline) Synthesize(ctx context.Context, req *core.SpeechRequest, opts
 	defer release(0)
 	var lastErr error
 	for _, a := range attempts {
+		prepared, prepErr := p.prepareMediaAttempt(ctx, a)
+		if prepErr != nil {
+			if !p.noteMediaFailure(ctx, a, prepErr) {
+				return nil, "", prepErr
+			}
+			lastErr = prepErr
+			continue
+		}
+		a = prepared
 		conn, ok := a.Conn.(core.SpeechConnector)
 		if !ok {
 			lastErr = unsupported(a.Target.Provider, "speech synthesis")
@@ -225,6 +261,15 @@ func (p *Pipeline) Search(ctx context.Context, req *core.SearchRequest, opts Med
 	defer release(0)
 	var lastErr error
 	for _, a := range attempts {
+		prepared, prepErr := p.prepareMediaAttempt(ctx, a)
+		if prepErr != nil {
+			if !p.noteMediaFailure(ctx, a, prepErr) {
+				return nil, "", prepErr
+			}
+			lastErr = prepErr
+			continue
+		}
+		a = prepared
 		conn, ok := a.Conn.(core.SearchConnector)
 		if !ok {
 			lastErr = unsupported(a.Target.Provider, "web search")
@@ -259,6 +304,15 @@ func (p *Pipeline) Fetch(ctx context.Context, req *core.FetchRequest, opts Media
 	defer release(0)
 	var lastErr error
 	for _, a := range attempts {
+		prepared, prepErr := p.prepareMediaAttempt(ctx, a)
+		if prepErr != nil {
+			if !p.noteMediaFailure(ctx, a, prepErr) {
+				return nil, "", prepErr
+			}
+			lastErr = prepErr
+			continue
+		}
+		a = prepared
 		conn, ok := a.Conn.(core.FetchConnector)
 		if !ok {
 			lastErr = unsupported(a.Target.Provider, "web fetch")
@@ -449,6 +503,14 @@ func estimateEmbeddingTokens(req *core.EmbeddingRequest) int64 {
 		chars += len(input)
 	}
 	return int64((chars + 3) / 4)
+}
+
+// prepareMediaAttempt refreshes OAuth for one attempt (9router parity).
+func (p *Pipeline) prepareMediaAttempt(ctx context.Context, a dispatch.Attempt) (dispatch.Attempt, error) {
+	if p.dispatcher == nil {
+		return a, nil
+	}
+	return p.dispatcher.PrepareAttempt(ctx, a)
 }
 
 // noteMediaFailure records a cooldown and reports whether the pipeline should

@@ -192,9 +192,51 @@ func New(conns ConnectorSource, accounts *store.AccountRepo, v *vault.Vault) *Di
 	}
 }
 
-// SetTokenRefresher installs an OAuth token refresher, consulted before opening
-// each account's credentials.
+// SetTokenRefresher installs an OAuth token refresher, consulted just-in-time
+// when an attempt is about to hit the upstream (PrepareAttempt), not during Plan.
 func (d *Dispatcher) SetTokenRefresher(r TokenRefresher) { d.refresher = r }
+
+// PrepareAttempt refreshes OAuth for a single attempt and re-opens vault
+// credentials. Call this immediately before Chat/Stream for that attempt —
+// 9router parity: getProviderCredentials → checkAndRefreshToken → POST.
+// Plan intentionally does not refresh, so farms with thousands of expired
+// access tokens stay fast at plan time.
+func (d *Dispatcher) PrepareAttempt(ctx context.Context, a Attempt) (Attempt, error) {
+	if d == nil {
+		return a, nil
+	}
+	if d.refresher != nil {
+		acc, err := d.refresher.EnsureFresh(ctx, a.Account)
+		if err != nil {
+			return a, err
+		}
+		a.Account = acc
+	}
+	if d.vault == nil {
+		return a, nil
+	}
+	creds, err := d.vault.Open(a.Account)
+	if err != nil {
+		return a, err
+	}
+	// Preserve proxy resolved at plan time when re-open drops it.
+	if a.Creds.ProxyURL != "" || a.Creds.RelayURL != "" {
+		creds.ProxyURL = a.Creds.ProxyURL
+		creds.NoProxy = a.Creds.NoProxy
+		creds.RelayURL = a.Creds.RelayURL
+	} else if d.pools != nil && a.Account.ProxyPoolID != "" {
+		if perr := proxy.ResolvePool(ctx, d.pools, a.Account.ProxyPoolID, &creds); perr != nil {
+			return a, perr
+		}
+	} else if d.proxyReader != nil {
+		if u := d.proxyReader.ProxyURL(); u != "" {
+			creds.ProxyURL = u
+			creds.NoProxy = d.proxyReader.NoProxy()
+		}
+	}
+	a.Creds = creds
+	return a, nil
+}
 
 // SetPoolSource installs a proxy pool resolver, consulted when an account has a
 // proxy_pool_id binding.
@@ -388,6 +430,10 @@ func (d *Dispatcher) PlanWith(ctx context.Context, tenantID string, targets []Ta
 			continue
 		}
 		accs = d.applyAccountRouting(ctx, tenantID, target, accs, opts.accountRoutingForTarget(target.Provider))
+		// Farm-scale OAuth (thousands of accounts): Prefer still-valid tokens so
+		// Plan does not serial-refresh thousands of expired access tokens before
+		// the first Chat attempt. Stale accounts remain as fallbacks after fresh ones.
+		accs = preferFreshOAuthAccounts(accs, now)
 		accountIDs := accountIDsByProvider[target.Provider]
 
 		var cooldownExpirations map[string]time.Time
@@ -399,7 +445,18 @@ func (d *Dispatcher) PlanWith(ctx context.Context, tenantID string, targets []Ta
 			unhealthySet, _ = d.health.UnhealthyAccounts(ctx, accountIDs, target.Model)
 		}
 
+		// Cap prepared attempts per target. Plan only opens vault + proxy —
+		// OAuth EnsureFresh is deferred to PrepareAttempt (pipeline call site),
+		// matching 9router: pick account → refresh THAT one → chat. Refreshing
+		// dozens of expired tokens here made farm chat take 20s+ before TTFT.
+		// Wide window so round-robin can walk past 403/402 accounts.
+		const maxPreparedPerTarget = 96
+		preparedForTarget := 0
+
 		for _, acc := range accs {
+			if preparedForTarget >= maxPreparedPerTarget {
+				break
+			}
 			key := AttemptKey{Provider: target.Provider, Model: target.Model, AccountID: acc.ID}
 			if _, excluded := opts.ExcludedAttempts[key]; excluded {
 				lastReason = fmt.Sprintf("account %s already attempted for model %s", acc.ID, target.Model)
@@ -445,10 +502,8 @@ func (d *Dispatcher) PlanWith(ctx context.Context, tenantID string, targets []Ta
 			prepared, ok := preparedAccounts[acc.ID]
 			if !ok {
 				prepared.account = acc
-				if d.refresher != nil {
-					prepared.account, prepared.err = d.refresher.EnsureFresh(ctx, prepared.account)
-				}
-				if prepared.err == nil {
+				// No EnsureFresh here — see PrepareAttempt.
+				if d.vault != nil {
 					prepared.creds, prepared.err = d.vault.Open(prepared.account)
 				}
 				if prepared.err == nil && d.pools != nil && prepared.account.ProxyPoolID != "" {
@@ -477,6 +532,7 @@ func (d *Dispatcher) PlanWith(ctx context.Context, tenantID string, targets []Ta
 			} else {
 				attempts = append(attempts, attempt)
 			}
+			preparedForTarget++
 		}
 	}
 
@@ -521,6 +577,44 @@ func (d *Dispatcher) PlanWith(ctx context.Context, tenantID string, targets []Ta
 		return nil, &core.ProviderError{Kind: core.ErrInternal, Message: "dispatch: " + lastReason}
 	}
 	return attempts, nil
+}
+
+// preferFreshOAuthAccounts stable-partitions accounts so those with a still-valid
+// access token (past per-provider refresh lead) come first. Non-OAuth and
+// no-expiry accounts stay at the front of the "fresh" group. Relative order
+// within each group is preserved (priority / round-robin already applied).
+func preferFreshOAuthAccounts(accs []store.Account, now time.Time) []store.Account {
+	if len(accs) < 2 {
+		return accs
+	}
+	fresh := make([]store.Account, 0, len(accs))
+	stale := make([]store.Account, 0, len(accs))
+	for _, acc := range accs {
+		if acc.AuthKind != store.AuthOAuth || acc.TokenExpiresAt == nil {
+			fresh = append(fresh, acc)
+			continue
+		}
+		lead := oauthRefreshLead(acc.Provider)
+		if acc.TokenExpiresAt.After(now.Add(lead)) {
+			fresh = append(fresh, acc)
+		} else {
+			stale = append(stale, acc)
+		}
+	}
+	if len(stale) == 0 || len(fresh) == 0 {
+		return accs
+	}
+	return append(fresh, stale...)
+}
+
+// oauthRefreshLead mirrors oauth.providerRefreshLead without importing oauth
+// (dispatch must not depend on oauth package cycle). Same rule: 10m for
+// grok-cli, else 60s global skew.
+func oauthRefreshLead(provider string) time.Duration {
+	if provider == "grok-cli" {
+		return 10 * time.Minute
+	}
+	return 60 * time.Second
 }
 
 // NoteFailure applies cooldowns to an account (and optionally a model) based on
@@ -615,6 +709,8 @@ func (d *Dispatcher) NoteFailure(ctx context.Context, accountID string, err *cor
 	case core.ErrRateLimit:
 		cooldown = d.exponentialCooldown(ctx, accountID)
 	case core.ErrQuotaExhausted:
+		// Spending-limit / subscription exhausted (e.g. Grok 402). Long cool
+		// so farm round-robin rotates past drained accounts for a while.
 		cooldown = 30 * time.Minute
 		if err.CreditsExhausted {
 			// A depleted paid balance is terminal until the user tops up.
@@ -624,7 +720,18 @@ func (d *Dispatcher) NoteFailure(ctx context.Context, accountID string, err *cor
 			jitter = false
 		}
 	case core.ErrAuth:
-		cooldown = 5 * time.Minute
+		// 403 permission-denied on cli-chat-proxy is usually permanent for
+		// that account (no Grok Build chat entitlement), not a flaky token.
+		// Cool longer than 401 so the next request's RR window skips it.
+		if err.StatusCode == 403 {
+			cooldown = time.Hour
+		} else {
+			cooldown = 5 * time.Minute
+		}
+	case core.ErrUpstream, core.ErrTimeout:
+		// Transient errors: apply a short cooldown so the account gets a
+		// breather without being locked out for too long.
+		cooldown = TransientCooldown
 	default:
 		// Transient upstream errors: apply a short cooldown so the account
 		// gets a breather without being locked out for too long.
