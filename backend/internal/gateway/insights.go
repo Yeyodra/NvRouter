@@ -16,7 +16,6 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/mydisha/keirouter/backend/internal/connectors"
-	"github.com/mydisha/keirouter/backend/internal/core"
 	"github.com/mydisha/keirouter/backend/internal/httputil"
 	"github.com/mydisha/keirouter/backend/internal/store"
 	"github.com/mydisha/keirouter/backend/internal/usagehub"
@@ -400,6 +399,11 @@ func (s *Server) adminQuotaUsage(w http.ResponseWriter, r *http.Request) {
 		usageByID[u.AccountID] = u
 	}
 
+	// Semaphore limits concurrent upstream quota probes. Farm pools (1000+
+	// grok-cli accounts) must not fire 1000 goroutines / EnsureFresh in parallel.
+	const maxQuotaProbes = 12
+	sem := make(chan struct{}, maxQuotaProbes)
+
 	var wg sync.WaitGroup
 	out := make([]map[string]any, 0, len(accs))
 
@@ -457,53 +461,55 @@ func (s *Server) adminQuotaUsage(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, entry)
 
-		// Fetch upstream quota for providers that support it (e.g. Kiro) concurrently.
+		// Fetch upstream quota for providers that support it concurrently.
+		// EnsureFresh + FetchQuota moved INSIDE the goroutine so the main loop
+		// never serial-refreshes 1000+ expired tokens (farm-scale hang fix).
 		if quotaSource != nil && !a.Disabled {
-			// Refresh OAuth access tokens before probing so expired tokens
-			// don't silently suppress the quota/credits detail box. Mirrors
-			// the refresh-then-probe pattern in validateAccountCredentials.
-			quotaAcc := a
-			if s.refresher != nil {
-				if refreshed, rerr := s.refresher.EnsureFresh(ctx, a); rerr == nil {
-					quotaAcc = refreshed
-				}
-			}
-			if creds, err := s.vault.Open(quotaAcc); err == nil {
-				wg.Add(1)
-				go func(target map[string]any, qs connectors.QuotaSource, creds core.Credentials) {
-					defer wg.Done()
-					quotaCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-					quota, qerr := qs.FetchQuota(quotaCtx, creds)
-					cancel()
-					if qerr == nil && quota != nil {
-						var quotas []map[string]any
-						for _, q := range quota.Quotas {
-							quotas = append(quotas, map[string]any{
-								"resource_type": q.ResourceType,
-								"used":          q.Used,
-								"limit":         q.Limit,
-								"remaining":     q.Remaining,
-								"reset_at":      q.ResetAt,
-							})
-						}
+			wg.Add(1)
+			go func(target map[string]any, acc store.Account, qs connectors.QuotaSource) {
+				defer wg.Done()
+				sem <- struct{}{}        // acquire
+				defer func() { <-sem }() // release
 
-						target["plan_name"] = quota.PlanName
-						target["message"] = quota.Message
-						if len(quotas) > 0 {
-							target["quota_state"] = "reported"
-							target["upstream_quotas"] = quotas
-						} else {
-							target["quota_state"] = "unavailable"
-						}
-					} else {
-						target["quota_state"] = "error"
-						target["message"] = "Upstream quota could not be refreshed."
+				quotaAcc := acc
+				if s.refresher != nil {
+					if refreshed, rerr := s.refresher.EnsureFresh(ctx, acc); rerr == nil {
+						quotaAcc = refreshed
 					}
-				}(entry, quotaSource, creds)
-			} else {
-				entry["quota_state"] = "error"
-				entry["message"] = "Credentials could not be opened for quota refresh."
-			}
+				}
+				creds, err := s.vault.Open(quotaAcc)
+				if err != nil {
+					target["quota_state"] = "error"
+					target["message"] = "Credentials could not be opened for quota refresh."
+					return
+				}
+				quotaCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+				quota, qerr := qs.FetchQuota(quotaCtx, creds)
+				cancel()
+				if qerr == nil && quota != nil {
+					var quotas []map[string]any
+					for _, q := range quota.Quotas {
+						quotas = append(quotas, map[string]any{
+							"resource_type": q.ResourceType,
+							"used":          q.Used,
+							"limit":         q.Limit,
+							"remaining":     q.Remaining,
+							"reset_at":      q.ResetAt,
+						})
+					}
+					target["plan_name"] = quota.PlanName
+					target["message"] = quota.Message
+					if len(quotas) > 0 {
+						target["quota_state"] = "reported"
+						target["upstream_quotas"] = quotas
+					} else {
+						target["quota_state"] = "unavailable"
+					}
+				} else {
+					target["quota_state"] = "error"
+					target["message"] = "Upstream quota could not be refreshed."
+				}
+			}(entry, a, quotaSource)
 		}
 	}
 	wg.Wait()
