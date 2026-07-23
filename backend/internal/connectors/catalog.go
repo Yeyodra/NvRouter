@@ -16,8 +16,11 @@ type RegionOption struct {
 type ProviderSpec struct {
 	ID          string
 	DisplayName string
-	// Alias is the short code accepted in model strings (e.g. "ds" -> deepseek).
-	Alias   string
+	// Alias is the primary short code accepted in model strings (e.g. "ds" -> deepseek).
+	Alias string
+	// Aliases lists additional short codes that also resolve to this provider.
+	// Primary Alias remains the canonical/display code; leave empty for single-alias providers.
+	Aliases []string
 	Dialect core.Dialect
 	BaseURL string
 	// AuthKind is the default authentication mechanism (api_key, oauth, none).
@@ -180,6 +183,11 @@ func oauthProviders() []ProviderSpec {
 		{ID: "codex", DisplayName: "OpenAI Codex", Alias: "cx", Dialect: core.DialectOpenAIResponses,
 			BaseURL: "https://chatgpt.com/backend-api/codex/responses", AuthKind: "oauth", AuthModes: []string{"oauth"},
 			ServiceKinds: llm(core.ServiceImage), Color: "#3B82F6", Website: "https://chatgpt.com/codex", Deprecated: true, Notice: risk},
+		// Distinct from xai (api.x.ai) and grok-web (cookie): Grok Build via cli-chat-proxy.
+		{ID: "grok-cli", DisplayName: "Grok CLI (Grok Build)", Alias: "gcli", Aliases: []string{"gb", "grok-build"}, Dialect: core.DialectOpenAIResponses,
+			BaseURL: "https://cli-chat-proxy.grok.com/v1", AuthKind: "oauth", AuthModes: []string{"oauth"}, ServiceKinds: llm(),
+			Color: "#1DA1F2", Website: "https://x.ai",
+			Notice: "Sign in with your xAI / Grok account via device code. Uses SuperGrok / Grok Build subscription credits (cli-chat-proxy.grok.com)."},
 		{ID: "github", DisplayName: "GitHub Copilot", Alias: "gh", Dialect: core.DialectOpenAI,
 			BaseURL: "https://api.githubcopilot.com", AuthKind: "oauth", AuthModes: []string{"oauth"},
 			ServiceKinds: llm(core.ServiceEmbedding), Color: "#333333", Website: "https://github.com/features/copilot", Deprecated: true, Notice: risk},
@@ -596,11 +604,16 @@ func SpecByID(id string) (ProviderSpec, bool) {
 	return ProviderSpec{}, false
 }
 
-// SpecByAlias resolves a provider by its short alias or id.
+// SpecByAlias resolves a provider by its short alias, extra aliases, or id.
 func SpecByAlias(aliasOrID string) (ProviderSpec, bool) {
 	for _, p := range Catalog() {
 		if p.ID == aliasOrID || p.Alias == aliasOrID {
 			return p, true
+		}
+		for _, a := range p.Aliases {
+			if a == aliasOrID {
+				return p, true
+			}
 		}
 	}
 	return ProviderSpec{}, false

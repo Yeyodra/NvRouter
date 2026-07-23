@@ -130,6 +130,16 @@ var providerModels = map[string][]ModelSpec{
 		k("grok-2-vision-1212", "Grok 2 Vision", core.ServiceImageToText),
 		k("grok-imagine-video", "Grok Imagine Video", core.ServiceVideo),
 	},
+	// grok-cli: subscription Grok Build. Effort suffixes are catalog IDs only;
+	// connector remaps to upstream model + effort (see GrokCLI).
+	"grok-cli": {
+		m("grok-build", "Grok Build"),
+		m("grok-4.5", "Grok 4.5"),
+		m("grok-4.5-xhigh", "Grok 4.5 (xHigh)"),
+		m("grok-4.5-high", "Grok 4.5 (High)"),
+		m("grok-4.5-medium", "Grok 4.5 (Medium)"),
+		m("grok-4.5-low", "Grok 4.5 (Low)"),
+	},
 	"mistral": {
 		m("mistral-large-latest", "Mistral Large 3"), m("codestral-latest", "Codestral"),
 		m("mistral-medium-latest", "Mistral Medium 3"), emb("mistral-embed", "Mistral Embed", 1024),

@@ -29,20 +29,20 @@ const (
 // api.anthropic.com.
 func claudeCLISpoofHeaders() map[string]string {
 	return map[string]string{
-		"anthropic-version":                          "2023-06-01",
-		"anthropic-beta":                             "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28",
+		"anthropic-version":                         "2023-06-01",
+		"anthropic-beta":                            "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28",
 		"anthropic-dangerous-direct-browser-access": "true",
-		"user-agent":                                 "claude-cli/" + claudeVersion + " (external, sdk-cli)",
-		"x-app":                                      "cli",
-		"x-stainless-helper-method":                  "stream",
-		"x-stainless-retry-count":                    "0",
-		"x-stainless-runtime-version":                "v24.14.0",
-		"x-stainless-package-version":                "0.80.0",
-		"x-stainless-runtime":                        "node",
-		"x-stainless-lang":                           "js",
-		"x-stainless-arch":                           stainlessArch(),
-		"x-stainless-os":                             stainlessOS(),
-		"x-stainless-timeout":                        "600",
+		"user-agent":                                "claude-cli/" + claudeVersion + " (external, sdk-cli)",
+		"x-app":                                     "cli",
+		"x-stainless-helper-method":                 "stream",
+		"x-stainless-retry-count":                   "0",
+		"x-stainless-runtime-version":               "v24.14.0",
+		"x-stainless-package-version":               "0.80.0",
+		"x-stainless-runtime":                       "node",
+		"x-stainless-lang":                          "js",
+		"x-stainless-arch":                          stainlessArch(),
+		"x-stainless-os":                            stainlessOS(),
+		"x-stainless-timeout":                       "600",
 	}
 }
 

@@ -46,6 +46,57 @@ func TestSpecByAlias(t *testing.T) {
 	}
 }
 
+func TestGrokCLICatalog(t *testing.T) {
+	spec, ok := SpecByID("grok-cli")
+	if !ok {
+		t.Fatal("catalog missing grok-cli")
+	}
+	if spec.DisplayName != "Grok CLI (Grok Build)" {
+		t.Fatalf("unexpected DisplayName %q", spec.DisplayName)
+	}
+	if spec.Alias != "gcli" {
+		t.Fatalf("unexpected Alias %q", spec.Alias)
+	}
+	if len(spec.Aliases) != 2 || spec.Aliases[0] != "gb" || spec.Aliases[1] != "grok-build" {
+		t.Fatalf("unexpected Aliases %v want [gb grok-build]", spec.Aliases)
+	}
+	if spec.Dialect != core.DialectOpenAIResponses {
+		t.Fatalf("unexpected Dialect %q", spec.Dialect)
+	}
+	if spec.BaseURL != "https://cli-chat-proxy.grok.com/v1" {
+		t.Fatalf("unexpected BaseURL %q", spec.BaseURL)
+	}
+	if spec.AuthKind != "oauth" {
+		t.Fatalf("unexpected AuthKind %q", spec.AuthKind)
+	}
+	if len(spec.AuthModes) != 1 || spec.AuthModes[0] != "oauth" {
+		t.Fatalf("unexpected AuthModes %v", spec.AuthModes)
+	}
+	if spec.Color != "#1DA1F2" {
+		t.Fatalf("unexpected Color %q", spec.Color)
+	}
+	if spec.Website != "https://x.ai" {
+		t.Fatalf("unexpected Website %q", spec.Website)
+	}
+	if spec.Notice == "" {
+		t.Fatal("expected Notice about device code / SuperGrok credits")
+	}
+
+	for _, alias := range []string{"gcli", "gb", "grok-build"} {
+		byAlias, ok := SpecByAlias(alias)
+		if !ok || byAlias.ID != "grok-cli" {
+			t.Fatalf("alias %q should resolve to grok-cli, got %q ok=%v", alias, byAlias.ID, ok)
+		}
+		if byAlias.Dialect != core.DialectOpenAIResponses {
+			t.Fatalf("%s dialect want openai_responses, got %q", alias, byAlias.Dialect)
+		}
+	}
+	// Existing single-alias providers still resolve.
+	if gh, ok := SpecByAlias("gh"); !ok || gh.ID != "github" {
+		t.Fatalf("alias gh should still resolve to github, got %q ok=%v", gh.ID, ok)
+	}
+}
+
 func TestSpecsByKind(t *testing.T) {
 	cases := map[core.ServiceKind][]string{
 		core.ServiceImage:  {"nanobanana", "fal-ai", "stability-ai"},
@@ -253,7 +304,7 @@ func TestRegistryRegistersDrivableProviders(t *testing.T) {
 		}
 	}
 	// Every subscription/proprietary provider now has a connector.
-	for _, id := range []string{"kiro", "gemini-cli", "antigravity", "commandcode", "cursor", "github", "qwen", "iflow"} {
+	for _, id := range []string{"kiro", "gemini-cli", "antigravity", "commandcode", "cursor", "github", "qwen", "iflow", "grok-cli"} {
 		if !r.Has(id) {
 			t.Errorf("registry should have connector for %q", id)
 		}

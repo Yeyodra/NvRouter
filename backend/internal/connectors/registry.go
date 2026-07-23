@@ -91,6 +91,13 @@ func DefaultRegistry() *Registry {
 			t := NewTasklet(p.BaseURL)
 			conns = append(conns, t)
 			RegisterQuotaSource(p.ID, t)
+		case p.ID == "grok-cli":
+			// Dedicated transport: Grok fingerprint, Responses shaping,
+			// soft-402 validation, explicit live models, and quota.
+			gc := NewGrokCLI(p.ID, p.BaseURL)
+			conns = append(conns, gc)
+			RegisterLiveModelSource(p.ID, NewGrokCLIModelSource(gc))
+			RegisterQuotaSource(p.ID, gc)
 		case webOnlyProviders[p.ID]:
 			conns = append(conns, NewWebConnector(p.ID, p.BaseURL))
 		case p.Dialect == core.DialectAnthropic:

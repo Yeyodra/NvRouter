@@ -662,6 +662,8 @@ func shouldRetryFreshConnection(ctx context.Context, err error) bool {
 
 // httpStatusError maps an HTTP error status to a structured ProviderError.
 func httpStatusError(provider, model string, resp *http.Response, body []byte) error {
+	msg := truncateError(body)
+	lower := strings.ToLower(msg)
 	kind := core.ErrUpstream
 	var retryAfter time.Duration
 	var creditsExhausted bool
@@ -673,8 +675,9 @@ func httpStatusError(provider, model string, resp *http.Response, body []byte) e
 		kind, retryAfter, creditsExhausted = classify429(resp, body)
 	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
 		kind = core.ErrAuth
-		// Some gateways report a depleted balance as 403 rather than 402.
-		if looksLikeCreditsExhausted(string(body)) {
+		// Some gateways, including Grok cli-chat-proxy, report a depleted
+		// balance as 403 rather than 402.
+		if looksLikeCreditsExhausted(string(body)) || strings.Contains(lower, "spending-limit") {
 			kind = core.ErrQuotaExhausted
 			creditsExhausted = true
 		}
@@ -718,7 +721,7 @@ func httpStatusError(provider, model string, resp *http.Response, body []byte) e
 		Provider:         provider,
 		Model:            model,
 		StatusCode:       resp.StatusCode,
-		Message:          truncateError(body),
+		Message:          msg,
 		RetryAfter:       retryAfter,
 		CreditsExhausted: creditsExhausted,
 	}
