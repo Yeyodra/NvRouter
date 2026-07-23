@@ -99,7 +99,7 @@ func priceModelCandidates(model string) []string {
 		m = strings.TrimPrefix(m[strings.IndexByte(m, '/')+1:], "/")
 		out = append(out, m)
 	}
-	for _, suffix := range []string{"-xhigh-review", "-high-review", "-low-review", "-none-review", "-review", "-xhigh", "-high", "-low", "-none"} {
+	for _, suffix := range []string{"-xhigh-review", "-high-review", "-medium-review", "-low-review", "-none-review", "-review", "-xhigh", "-high", "-medium", "-low", "-none"} {
 		if strings.HasSuffix(strings.ToLower(m), suffix) {
 			out = append(out, m[:len(m)-len(suffix)])
 			break
@@ -135,6 +135,7 @@ func ModelPricingTable() []ModelPrice {
 	out = append(out, groqModelPrices()...)
 	out = append(out, mistralModelPrices()...)
 	out = append(out, xaiModelPrices()...)
+	out = append(out, grokCLIModelPrices()...)
 	out = append(out, perplexityModelPrices()...)
 	out = append(out, cohereModelPrices()...)
 	out = append(out, togetherModelPrices()...)
@@ -332,6 +333,32 @@ func xaiModelPrices() []ModelPrice {
 		{Provider: "xai", Model: "grok-3-mini", InputPerM: 0.3, OutputPerM: 0.5, CachedInputPerM: 0.075, CacheWritePerM: 0.3, ReasoningPerM: 0.5},
 		{Provider: "xai", Model: "grok-2", InputPerM: 2, OutputPerM: 10, CachedInputPerM: 0.5, CacheWritePerM: 2},
 	}
+}
+
+// grokCLIModelPrices returns retail-equivalent rates for Grok CLI / Grok Build.
+// Upstream is SuperGrok subscription credits (cli-chat-proxy), not pay-per-token;
+// rates match 9router open-sse/providers/pricing.js grok-* pattern so usage
+// analytics can show approximate cost.
+func grokCLIModelPrices() []ModelPrice {
+	const (
+		inPerM     = 0.50
+		outPerM    = 2.00
+		cachedPerM = 0.25
+		writePerM  = 0.50
+		reasonPerM = 3.00
+	)
+	// Effort virtuals (-low/-medium/-high/-xhigh) resolve via priceModelCandidates.
+	models := []string{"grok-build", "grok-4.5", "grok-code-fast-1"}
+	prices := make([]ModelPrice, 0, len(models))
+	for _, m := range models {
+		prices = append(prices, ModelPrice{
+			Provider: "grok-cli", Model: m,
+			InputPerM: inPerM, OutputPerM: outPerM,
+			CachedInputPerM: cachedPerM, CacheWritePerM: writePerM, ReasoningPerM: reasonPerM,
+			Source: "retail_equivalent", SourceURL: "https://x.ai", Estimated: true,
+		})
+	}
+	return prices
 }
 
 func perplexityModelPrices() []ModelPrice {
