@@ -218,9 +218,6 @@ func oauthProviders() []ProviderSpec {
 		{ID: "clinepass", DisplayName: "ClinePass", Alias: "clinepass", Dialect: core.DialectOpenAI,
 			BaseURL: "https://api.cline.bot/api/v1", AuthKind: "oauth", AuthModes: []string{"oauth", "api_key"}, ServiceKinds: llm(),
 			Color: "#5B9BD5", Website: "https://cline.bot"},
-		{ID: "grok-cli", DisplayName: "Grok CLI (Grok Build)", Alias: "gcli", Dialect: core.DialectOpenAIResponses,
-			BaseURL: "https://cli-chat-proxy.grok.com/v1/responses", AuthKind: "oauth", AuthModes: []string{"oauth"}, ServiceKinds: llm(),
-			Color: "#1DA1F2", Website: "https://x.ai", Deprecated: true, Notice: risk, SkipValidation: true},
 	}
 }
 

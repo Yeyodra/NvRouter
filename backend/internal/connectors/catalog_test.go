@@ -46,6 +46,16 @@ func TestSpecByAlias(t *testing.T) {
 	}
 }
 
+func TestCatalogProviderIDsAreUnique(t *testing.T) {
+	seen := map[string]bool{}
+	for _, spec := range Catalog() {
+		if seen[spec.ID] {
+			t.Fatalf("duplicate provider id %q", spec.ID)
+		}
+		seen[spec.ID] = true
+	}
+}
+
 func TestGrokCLICatalog(t *testing.T) {
 	spec, ok := SpecByID("grok-cli")
 	if !ok {
