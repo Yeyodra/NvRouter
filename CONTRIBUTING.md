@@ -4,9 +4,10 @@ Thanks for your interest in contributing! This document covers everything you ne
 
 ## Prerequisites
 
-- **Go 1.24+**
+- **Go 1.26+**
 - **Node.js 20+** and npm
 - **Git**
+- **curl** (used by `make dev` readiness checks)
 
 ## Development setup
 
@@ -18,7 +19,7 @@ cd keirouter
 # Install dependencies
 make install
 
-# Run backend + frontend together (hot reload)
+# Run backend + frontend together (Vite hot reload; restart for Go changes)
 make dev
 ```
 
@@ -49,15 +50,19 @@ This starts the backend on `:20180` and the dashboard on `:5180`.
    ```bash
    make test          # Go tests
    make vet           # Go static analysis
-   cd frontend && npm run lint && npm run typecheck
+   cd frontend && npm run typecheck && npm run build
    ```
 
 4. **Open a Pull Request** against `main`. Fill out the PR template.
 
+## Adding a provider
+
+Read [`ADDING_PROVIDER.md`](ADDING_PROVIDER.md) before changing provider code. It documents the generic-vs-dedicated connector decision, catalog and live-discovery boundaries, credential metadata, error scopes, streaming/retry invariants, UI assets, and the required test/verification ladder. Coding agents should also follow the root [`AGENTS.md`](AGENTS.md).
+
 ## Code style
 
 - **Go:** Follow standard Go conventions. Run `go vet` and `gofmt`.
-- **TypeScript:** The project uses ESLint + TypeScript strict mode. Run `npm run lint` and `npm run typecheck` in the `frontend/` directory.
+- **TypeScript:** The project uses TypeScript strict mode. Run `npm run typecheck` and `npm run build` in the `frontend/` directory.
 - **Commits:** Use concise, descriptive messages. Prefix with the area of change when helpful (e.g. `gateway: fix streaming chunk encoding`).
 
 ## Project structure
@@ -68,7 +73,8 @@ backend/
   internal/          all Go packages (see README architecture section)
 frontend/
   src/               React + TypeScript dashboard
-deploy/              Dockerfile + compose
+deploy/              Dockerfile and deployment notes
+compose*.yaml        Docker Compose variants
 ```
 
 ## Reporting bugs
