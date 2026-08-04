@@ -42,6 +42,16 @@ func emb(id, name string, dims int) ModelSpec {
 // Providers marked passthrough upstream (openrouter, vercel, ...) accept any
 // model id, so their listed set here is only a discovery hint, not an allow-list.
 var providerModels = map[string][]ModelSpec{
+	"enter-converge": {
+		m("openai/gpt-5.6-sol", "GPT 5.6 Sol"), m("openai/gpt-5.6-terra", "GPT 5.6 Terra"), m("openai/gpt-5.6-luna", "GPT 5.6 Luna"),
+		m("openai/gpt-5.5", "GPT 5.5"), m("openai/gpt-5.4-pro", "GPT 5.4 Pro"), m("openai/gpt-5.4", "GPT 5.4"), m("openai/gpt-5.2-pro", "GPT 5.2 Pro"),
+		m("anthropic/claude-opus-4.6", "Claude Opus 4.6"), m("anthropic/claude-sonnet-4.5", "Claude Sonnet 4.5"),
+		m("minimax/minimax-m3", "MiniMax M3"), m("minimax/minimax-m2.7", "MiniMax M2.7"), m("minimax/minimax-m2.5", "MiniMax M2.5"),
+		m("deepseek/deepseek-v4-pro", "DeepSeek V4 Pro"),
+		m("alibaba/qwen-3.7-plus", "Qwen 3.7 Plus"), m("alibaba/qwen-3.7-max", "Qwen 3.7 Max Preview"), m("alibaba/qwen-3.6-plus", "Qwen 3.6 Plus"), m("alibaba/qwen-3.6-max-preview", "Qwen 3.6 Max Preview"),
+		m("moonshotai/kimi-k3", "Kimi K3"), m("moonshotai/kimi-k2.7-code", "Kimi K2.7 Code"), m("moonshotai/kimi-k2.6", "Kimi K2.6"), m("moonshotai/kimi-k2.5", "Kimi K2.5"),
+		m("z-ai/glm-5.2", "GLM 5.2"), m("z-ai/glm-5.1", "GLM 5.1"), m("z-ai/glm-5", "GLM 5"),
+	},
 	"openai": {
 		m("gpt-5.4", "GPT-5.4"), m("gpt-5.4-mini", "GPT-5.4 Mini"), m("gpt-5.2", "GPT-5.2"),
 		m("gpt-5", "GPT-5"), m("gpt-5-mini", "GPT-5 Mini"), m("gpt-4o", "GPT-4o"),

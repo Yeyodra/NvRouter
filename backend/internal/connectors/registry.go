@@ -44,7 +44,6 @@ func (r *Registry) Has(provider string) bool {
 	return ok
 }
 
-
 // Providers returns the registered provider ids.
 func (r *Registry) Providers() []string {
 	out := make([]string, 0, len(r.byID))
@@ -83,6 +82,11 @@ func DefaultRegistry() *Registry {
 			conns = append(conns, NewQwen(p.ID, p.BaseURL))
 		case p.ID == "iflow":
 			conns = append(conns, NewIFlow(p.ID, p.BaseURL))
+		case p.ID == "enter-converge":
+			ec := NewEnterConverge(p.BaseURL)
+			conns = append(conns, ec)
+			RegisterLiveModelSource(p.ID, ec)
+			RegisterQuotaSource(p.ID, ec)
 		case webOnlyProviders[p.ID]:
 			conns = append(conns, NewWebConnector(p.ID, p.BaseURL))
 		case p.Dialect == core.DialectAnthropic:

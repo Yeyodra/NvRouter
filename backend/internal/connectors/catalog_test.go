@@ -1,6 +1,7 @@
 package connectors
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/mydisha/keirouter/backend/internal/core"
@@ -12,6 +13,25 @@ func TestCatalogHasCoreProviders(t *testing.T) {
 		if _, ok := SpecByID(id); !ok {
 			t.Errorf("catalog missing provider %q", id)
 		}
+	}
+}
+
+func TestEnterConvergeCatalog(t *testing.T) {
+	spec, ok := SpecByAlias("ec")
+	if !ok || spec.ID != "enter-converge" || spec.BaseURL != "https://api.enter.pro/code/api/v1" || spec.AuthKind != "api_key" {
+		t.Fatalf("unexpected Enter Converge spec: %+v ok=%v", spec, ok)
+	}
+	models := ModelsForProvider(spec.ID)
+	if len(models) != 24 {
+		t.Fatalf("Enter Converge models = %d, want 24", len(models))
+	}
+	for _, model := range models {
+		if strings.Contains(model.ID, "claude-opus-4.8") || strings.Contains(model.ID, "claude-opus-4.7") || strings.Contains(model.ID, "claude-sonnet-5") || strings.Contains(model.ID, "claude-sonnet-4.6") || strings.HasPrefix(model.ID, "google/") {
+			t.Fatalf("JWT/project-chat model exposed: %q", model.ID)
+		}
+	}
+	if _, err := DefaultRegistry().Get(spec.ID); err != nil {
+		t.Fatal("Enter Converge connector not registered")
 	}
 }
 

@@ -656,6 +656,7 @@ func (s *Server) adminCreateAccount(w http.ResponseWriter, r *http.Request) {
 		BaseURL           string `json:"base_url"`
 		Region            string `json:"region"`
 		AccountID         string `json:"account_id"`
+		WorkspaceID       string `json:"workspace_id"`
 		AzureEndpoint     string `json:"azure_endpoint"`
 		AzureDeployment   string `json:"azure_deployment"`
 		AzureAPIVersion   string `json:"azure_api_version"`
@@ -684,6 +685,10 @@ func (s *Server) adminCreateAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	authKind := accountAuthKind(spec, body.APIKey)
+	if body.Provider == "enter-converge" && !strings.HasPrefix(strings.TrimSpace(body.APIKey), "ek_") {
+		writeError(w, http.StatusBadRequest, "Enter Converge api_key must start with ek_")
+		return
+	}
 	if authKind != store.AuthNone && strings.TrimSpace(body.APIKey) == "" {
 		writeError(w, http.StatusBadRequest, "api_key is required")
 		return
@@ -708,6 +713,7 @@ func (s *Server) adminCreateAccount(w http.ResponseWriter, r *http.Request) {
 		BaseURL:           body.BaseURL,
 		Region:            body.Region,
 		AccountID:         body.AccountID,
+		WorkspaceID:       body.WorkspaceID,
 		AzureEndpoint:     body.AzureEndpoint,
 		AzureDeployment:   body.AzureDeployment,
 		AzureAPIVersion:   body.AzureAPIVersion,
@@ -745,6 +751,18 @@ func (s *Server) adminCreateAccount(w http.ResponseWriter, r *http.Request) {
 	if verr := s.validateAccountCredentials(r.Context(), acc); verr != nil {
 		writeError(w, http.StatusBadRequest, sanitizeError(s.log, verr, "credential validation failed"))
 		return
+	}
+	if body.Provider == "enter-converge" && strings.TrimSpace(meta["workspace_id"]) == "" {
+		workspace, err := s.resolveEnterWorkspace(r.Context(), acc)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, sanitizeError(s.log, err, "workspace resolution failed"))
+			return
+		}
+		meta["workspace_id"] = workspace
+		if err := s.vault.Seal(&acc, vault.NewSecret{APIKey: body.APIKey, Metadata: meta}); err != nil {
+			writeError(w, http.StatusInternalServerError, sanitizeError(s.log, err, "vault seal failed"))
+			return
+		}
 	}
 
 	if err := s.accounts.Create(r.Context(), acc); err != nil {
@@ -861,6 +879,11 @@ func (s *Server) adminBulkCreateAccounts(w http.ResponseWriter, r *http.Request)
 		results[i] = bulkAccountResult{Index: i, Label: label}
 
 		authKind := accountAuthKind(spec, key)
+		if body.Provider == "enter-converge" && !strings.HasPrefix(key, "ek_") {
+			results[i].Status = "error"
+			results[i].Error = "Enter Converge api_key must start with ek_"
+			continue
+		}
 		if authKind != store.AuthNone && key == "" {
 			results[i].Status = "error"
 			results[i].Error = "api_key is required"
@@ -1000,6 +1023,7 @@ func (s *Server) adminValidateKey(w http.ResponseWriter, r *http.Request) {
 		BaseURL           string `json:"base_url"`
 		Region            string `json:"region"`
 		AccountID         string `json:"account_id"`
+		WorkspaceID       string `json:"workspace_id"`
 		AzureEndpoint     string `json:"azure_endpoint"`
 		AzureDeployment   string `json:"azure_deployment"`
 		AzureAPIVersion   string `json:"azure_api_version"`
@@ -1018,6 +1042,10 @@ func (s *Server) adminValidateKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	authKind := accountAuthKind(spec, body.APIKey)
+	if body.Provider == "enter-converge" && !strings.HasPrefix(strings.TrimSpace(body.APIKey), "ek_") {
+		writeError(w, http.StatusBadRequest, "Enter Converge api_key must start with ek_")
+		return
+	}
 	if authKind != store.AuthNone && strings.TrimSpace(body.APIKey) == "" {
 		writeError(w, http.StatusBadRequest, "provider and api_key are required")
 		return
@@ -1046,6 +1074,7 @@ func (s *Server) adminValidateKey(w http.ResponseWriter, r *http.Request) {
 		BaseURL:           body.BaseURL,
 		Region:            body.Region,
 		AccountID:         body.AccountID,
+		WorkspaceID:       body.WorkspaceID,
 		AzureEndpoint:     body.AzureEndpoint,
 		AzureDeployment:   body.AzureDeployment,
 		AzureAPIVersion:   body.AzureAPIVersion,
@@ -1071,7 +1100,16 @@ func (s *Server) adminValidateKey(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "error", "message": verr.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+	response := map[string]any{"status": "ok"}
+	if body.Provider == "enter-converge" {
+		workspace, err := s.resolveEnterWorkspace(r.Context(), acc)
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"status": "error", "message": err.Error()})
+			return
+		}
+		response["workspace_id"] = workspace
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) adminUpdateAccount(w http.ResponseWriter, r *http.Request) {
@@ -2705,7 +2743,16 @@ func (s *Server) adminExportDatabase(w http.ResponseWriter, r *http.Request) {
 	// re-keyed from the local master key to a passphrase-derived key, so the
 	// backup can be restored on a machine with a different master key.
 	passphrase := strings.TrimSpace(r.URL.Query().Get("passphrase"))
+	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
 	portable := passphrase != ""
+	if format == "9router" {
+		if !strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("include_secrets")), "true") {
+			writeError(w, http.StatusBadRequest, "9router export requires include_secrets=true acknowledgement")
+			return
+		}
+		s.exportN9routerEnter(w, r)
+		return
+	}
 	export["portable"] = portable
 
 	// Export providers (accounts) — includes encrypted credentials.
@@ -3098,6 +3145,7 @@ type providerMetadataInput struct {
 	BaseURL           string
 	Region            string
 	AccountID         string
+	WorkspaceID       string
 	AzureEndpoint     string
 	AzureDeployment   string
 	AzureAPIVersion   string
@@ -3129,6 +3177,10 @@ func providerAccountMetadata(spec connectors.ProviderSpec, in providerMetadataIn
 	}
 
 	switch spec.ID {
+	case "enter-converge":
+		if workspace := strings.TrimSpace(in.WorkspaceID); workspace != "" {
+			meta["workspace_id"] = workspace
+		}
 	case "cloudflare-ai":
 		accountID := strings.TrimSpace(in.AccountID)
 		if accountID == "" {
@@ -3162,6 +3214,24 @@ func providerAccountMetadata(spec connectors.ProviderSpec, in providerMetadataIn
 	}
 
 	return meta, nil
+}
+
+func (s *Server) resolveEnterWorkspace(ctx context.Context, acc store.Account) (string, error) {
+	conn, err := s.conns.Get("enter-converge")
+	if err != nil {
+		return "", err
+	}
+	resolver, ok := conn.(interface {
+		ResolveWorkspace(context.Context, core.Credentials) (string, error)
+	})
+	if !ok {
+		return "", errors.New("Enter Converge workspace resolver unavailable")
+	}
+	creds, err := s.vault.Open(acc)
+	if err != nil {
+		return "", errors.New("could not decrypt credentials")
+	}
+	return resolver.ResolveWorkspace(ctx, creds)
 }
 
 // validateAccountCredentials unseals an account's credentials and, if the

@@ -265,6 +265,37 @@ func TestPlanWith_BuiltInProviderVisionStrippableSkipsGuard(t *testing.T) {
 	require.NotEmpty(t, attempts)
 }
 
+func TestEnter402CoolsOnlyExactModel(t *testing.T) {
+	ctx := context.Background()
+	account := testAccountWithProvider("acc-enter", "enter-converge", 10)
+	d, db := newDispatchTest(t, account)
+
+	d.NoteFailure(ctx, account.ID, &core.ProviderError{
+		Kind:             core.ErrQuotaExhausted,
+		Scope:            core.FailureScopeModel,
+		Provider:         "enter-converge",
+		Model:            "openai/gpt-5.6-sol",
+		StatusCode:       402,
+		RetryAfter:       10 * 365 * 24 * time.Hour,
+		CreditsExhausted: false,
+	})
+
+	stored, err := db.Accounts().Get(ctx, account.ID)
+	require.NoError(t, err)
+	require.Nil(t, stored.CooldownUntil)
+	require.False(t, stored.CreditsExhausted)
+	require.False(t, stored.Disabled)
+	locks, err := db.Routing().ListModelCooldowns(ctx, account.ID)
+	require.NoError(t, err)
+	require.Len(t, locks, 1)
+	require.Contains(t, locks, "openai/gpt-5.6-sol")
+
+	attempts, err := d.Plan(ctx, store.DefaultTenantID, []Target{{Provider: "enter-converge", Model: "minimax/minimax-m3"}}, core.NewCapabilitySet())
+	require.NoError(t, err)
+	require.Len(t, attempts, 1)
+	require.Equal(t, account.ID, attempts[0].Account.ID)
+}
+
 func TestNoteFailureHonorsRateLimitRetryAfter(t *testing.T) {
 	ctx := context.Background()
 	d, db := newDispatchTest(t, testAccount("acc-rate-limited", 10))

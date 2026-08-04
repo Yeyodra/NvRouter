@@ -155,6 +155,25 @@ func (r *RoutingRepo) ActiveCooldownExpirations(ctx context.Context, accountIDs 
 	return out, rows.Err()
 }
 
+// ListModelCooldowns returns every model cooldown for an account, including expired rows.
+func (r *RoutingRepo) ListModelCooldowns(ctx context.Context, accountID string) (map[string]time.Time, error) {
+	q := r.db.rebind(`SELECT model, cooldown_until FROM model_cooldowns WHERE account_id = ?`)
+	rows, err := r.db.sql.QueryContext(ctx, q, accountID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list model cooldowns: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]time.Time{}
+	for rows.Next() {
+		var model, raw string
+		if err := rows.Scan(&model, &raw); err != nil {
+			return nil, err
+		}
+		out[model] = parseTime(raw)
+	}
+	return out, rows.Err()
+}
+
 // ExpireModelCooldowns removes all expired model cooldowns (garbage collection).
 func (r *RoutingRepo) ExpireModelCooldowns(ctx context.Context) (int64, error) {
 	q := r.db.rebind(`DELETE FROM model_cooldowns WHERE cooldown_until < ?`)

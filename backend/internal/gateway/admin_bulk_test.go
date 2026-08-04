@@ -36,6 +36,7 @@ func newBulkTestServer(t *testing.T) (*Server, *store.DB) {
 	require.NoError(t, err)
 
 	s := &Server{
+		db:       db,
 		accounts: db.Accounts(),
 		vault:    vault.New(sealer),
 		log:      slog.Default(),

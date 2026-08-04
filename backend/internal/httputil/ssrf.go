@@ -2,6 +2,7 @@
 package httputil
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/url"
@@ -37,6 +38,48 @@ func (e *ErrSSRFBlocked) Error() string {
 // - Link-local addresses (169.254.0.0/16, fe80::/10)
 // - Cloud metadata endpoints (169.254.169.254, metadata.google.internal)
 // - Loopback addresses (::1, 127.0.0.1)
+// SafeDialContext resolves and validates the address used for an outbound
+// connection, preventing a DNS answer from changing between validation and dial.
+func SafeDialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	return safeDialContext(ctx, network, address, validateIP)
+}
+
+// StrictSafeDialContext is for fetching untrusted user-supplied content. Unlike
+// SafeDialContext it never inherits the allow-private-base-URL setting.
+func StrictSafeDialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	return safeDialContext(ctx, network, address, validateIPStrict)
+}
+
+func safeDialContext(ctx context.Context, network, address string, validate func(net.IP) error) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+	if err != nil {
+		return nil, err
+	}
+	for _, ip := range ips {
+		if err := validate(ip); err != nil {
+			return nil, err
+		}
+	}
+	if len(ips) == 0 {
+		return nil, &ErrSSRFBlocked{Reason: "hostname resolved to no addresses"}
+	}
+	return (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort(ips[0].String(), port))
+}
+
+func validateIPStrict(ip net.IP) error {
+	if ip.IsLoopback() {
+		return &ErrSSRFBlocked{Reason: "loopback address blocked"}
+	}
+	if ip.IsPrivate() {
+		return &ErrSSRFBlocked{Reason: "private network address blocked"}
+	}
+	return validateIP(ip)
+}
+
 func ValidateOutboundURL(rawURL string) error {
 	if rawURL == "" {
 		return nil // Empty URLs are handled by callers

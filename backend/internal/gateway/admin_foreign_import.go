@@ -318,6 +318,15 @@ func (s *Server) importN9routerConnections(ctx context.Context, doc map[string]j
 
 	for i, c := range conns {
 		if i < len(generic) {
+			c.Data = map[string]any{}
+			for key, raw := range generic[i] {
+				if strings.HasPrefix(key, "modelLock_") {
+					var value any
+					if json.Unmarshal(raw, &value) == nil {
+						c.Data[key] = value
+					}
+				}
+			}
 			if dataRaw, ok := generic[i]["data"]; ok && len(dataRaw) > 0 {
 				_ = json.Unmarshal(dataRaw, &c.Data)
 				if c.APIKey == "" {
@@ -395,6 +404,11 @@ func (s *Server) importN9routerConnections(ctx context.Context, doc map[string]j
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
+		if provider == "enter-converge" && (!strings.HasPrefix(strings.TrimSpace(c.APIKey), "ek_") || authKind != store.AuthAPIKey) {
+			res.Skipped++
+			res.Errors = append(res.Errors, fmt.Sprintf("connection %s: Enter Converge requires an ek_ API key", c.ID))
+			continue
+		}
 		secret.ExpiresAt = parseRFC3339(c.ExpiresAt)
 		secret.Metadata = meta
 		if err := s.vault.Seal(&acc, secret); err != nil {
@@ -406,6 +420,22 @@ func (s *Server) importN9routerConnections(ctx context.Context, doc map[string]j
 			res.Skipped++
 			res.Errors = append(res.Errors, fmt.Sprintf("connection %s: create account: %v", c.ID, err))
 			continue
+		}
+		if provider == "enter-converge" {
+			for key, value := range c.Data {
+				if !strings.HasPrefix(key, "modelLock_") {
+					continue
+				}
+				model := strings.TrimPrefix(key, "modelLock_")
+				until := parseForeignLock(value)
+				if model == "" || until.IsZero() {
+					res.Errors = append(res.Errors, fmt.Sprintf("connection %s: invalid model lock %q", c.ID, key))
+					continue
+				}
+				if err := s.db.Routing().SetModelCooldown(ctx, acc.ID, model, until); err != nil {
+					res.Errors = append(res.Errors, fmt.Sprintf("connection %s: import model lock %q: %v", c.ID, model, err))
+				}
+			}
 		}
 		res.Accounts++
 	}
@@ -1043,6 +1073,23 @@ func strVal(v any) string {
 		b, _ := json.Marshal(t)
 		return string(b)
 	}
+}
+
+func parseForeignLock(v any) time.Time {
+	switch value := v.(type) {
+	case string:
+		if t, err := time.Parse(time.RFC3339, strings.TrimSpace(value)); err == nil {
+			return t
+		}
+	case float64:
+		if value > 0 {
+			if value > 1e12 {
+				return time.UnixMilli(int64(value))
+			}
+			return time.Unix(int64(value), 0)
+		}
+	}
+	return time.Time{}
 }
 
 func parseRFC3339(s string) *time.Time {

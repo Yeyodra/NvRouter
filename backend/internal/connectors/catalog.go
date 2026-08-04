@@ -219,6 +219,9 @@ func oauthProviders() []ProviderSpec {
 // apiKeyProviders is the large API-key-authenticated provider set.
 func apiKeyProviders() []ProviderSpec {
 	return []ProviderSpec{
+		{ID: "enter-converge", DisplayName: "Enter Converge", Alias: "ec", Dialect: core.DialectOpenAI,
+			BaseURL: "https://api.enter.pro/code/api/v1", AuthKind: "api_key", ServiceKinds: llm(),
+			Color: "#6366F1", Website: "https://enter.converge.ai", APIKeyURL: "https://enter.converge.ai"},
 		{ID: "openai", DisplayName: "OpenAI", Alias: "openai", Dialect: core.DialectOpenAI,
 			BaseURL: "https://api.openai.com/v1", AuthKind: "api_key",
 			ServiceKinds: llm(core.ServiceEmbedding, core.ServiceTTS, core.ServiceSTT, core.ServiceImage, core.ServiceSearch),

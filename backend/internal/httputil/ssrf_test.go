@@ -1,6 +1,9 @@
 package httputil
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestValidateBaseURL_AllowPrivate(t *testing.T) {
 	// Default: loopback/private blocked.
@@ -43,6 +46,20 @@ func TestValidateBaseURL_AllowPrivate(t *testing.T) {
 		if err := ValidateBaseURL(bad); err == nil {
 			t.Errorf("expected %q to remain blocked with allow flag", bad)
 		}
+	}
+}
+
+func TestStrictSafeDialContextIgnoresPrivateBaseURLAllowance(t *testing.T) {
+	SetAllowPrivateBaseURL(true)
+	t.Cleanup(func() { SetAllowPrivateBaseURL(false) })
+
+	conn, err := StrictSafeDialContext(context.Background(), "tcp", "127.0.0.1:80")
+	if conn != nil {
+		_ = conn.Close()
+		t.Fatal("strict dial unexpectedly connected to loopback")
+	}
+	if err == nil {
+		t.Fatal("strict dial must block loopback even when private base URLs are allowed")
 	}
 }
 
