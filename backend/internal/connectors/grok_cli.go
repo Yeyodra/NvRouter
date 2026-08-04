@@ -3,6 +3,7 @@ package connectors
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -180,6 +181,10 @@ func (c *GrokCLI) patchBody(body []byte, model, effort string) ([]byte, error) {
 
 	// 9router parity: drop item_reference / bare server-id strings from input.
 	stripGrokCLIItemReferences(m)
+	// Canonical history may originate from another Responses provider. Grok
+	// rejects foreign encrypted reasoning, and custom tools must use function
+	// call/output wire items.
+	normalizeGrokCLIInput(m)
 	// Flatten Chat Completions nested tools → Responses flat shape.
 	flattenGrokCLITools(m)
 
@@ -216,6 +221,78 @@ func stripGrokCLIItemReferences(m map[string]any) {
 		default:
 			out = append(out, item)
 		}
+	}
+	m["input"] = out
+}
+
+func stringifyGrokCLIValue(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+func normalizeGrokCLIInput(m map[string]any) {
+	raw, ok := m["input"].([]any)
+	if !ok {
+		return
+	}
+	normalized := make([]any, 0, len(raw))
+	callIDs := make(map[string]bool)
+	for _, item := range raw {
+		v, ok := item.(map[string]any)
+		if !ok {
+			normalized = append(normalized, item)
+			continue
+		}
+		delete(v, "internal_chat_message_metadata_passthrough")
+		typ, _ := v["type"].(string)
+		switch typ {
+		case "reasoning":
+			// Canonical history does not retain a trusted native Grok item id.
+			continue
+		case "custom_tool_call":
+			callID, _ := firstToolString(v["call_id"], v["id"])
+			name, _ := v["name"].(string)
+			if callID == "" || strings.TrimSpace(name) == "" {
+				continue
+			}
+			arg := stringifyGrokCLIValue(firstToolAny(v["input"], v["arguments"]))
+			v = map[string]any{"type": "function_call", "call_id": callID, "name": strings.TrimSpace(name), "arguments": stringifyGrokCLIValue(map[string]any{"input": arg})}
+			callIDs[callID] = true
+		case "function_call":
+			callID, _ := firstToolString(v["call_id"], v["id"])
+			name, _ := v["name"].(string)
+			if callID == "" || strings.TrimSpace(name) == "" {
+				continue
+			}
+			v["call_id"] = callID
+			v["name"] = strings.TrimSpace(name)
+			v["arguments"] = stringifyGrokCLIValue(v["arguments"])
+			delete(v, "id")
+			callIDs[callID] = true
+		case "custom_tool_call_output", "function_call_output":
+			callID, _ := firstToolString(v["call_id"], v["id"])
+			if callID == "" {
+				continue
+			}
+			v = map[string]any{"type": "function_call_output", "call_id": callID, "output": stringifyGrokCLIValue(v["output"])}
+		}
+		normalized = append(normalized, v)
+	}
+	out := normalized[:0]
+	for _, item := range normalized {
+		if v, ok := item.(map[string]any); ok && v["type"] == "function_call_output" {
+			id, _ := v["call_id"].(string)
+			if !callIDs[id] {
+				continue
+			}
+		}
+		out = append(out, item)
 	}
 	m["input"] = out
 }
@@ -273,6 +350,19 @@ func flattenGrokCLITools(m map[string]any) {
 		// Hosted tools pass through as-is (cli-chat-proxy executes them).
 		if grokCLIHostedToolTypes[typ] {
 			out = append(out, tm)
+			continue
+		}
+		// Grok does not accept custom/freeform declarations. Mirror 9router by
+		// converting them into a single-string function contract.
+		if typ == "custom" || typ == "freeform" {
+			name, _ := tm["name"].(string)
+			if strings.TrimSpace(name) == "" {
+				continue
+			}
+			out = append(out, map[string]any{
+				"type": "function", "name": truncateGrokCLIToolName(strings.TrimSpace(name)), "description": tm["description"],
+				"parameters": map[string]any{"type": "object", "properties": map[string]any{"input": map[string]any{"type": "string"}}, "required": []any{"input"}},
+			})
 			continue
 		}
 		// Already-flat function: keep, cap name.
@@ -457,16 +547,10 @@ func (c *GrokCLI) Stream(ctx context.Context, req *core.ChatRequest, creds core.
 		}
 		if err := scanner.Err(); err != nil {
 			terminalSeen = true
-			out <- core.StreamChunk{
-				Type: core.ChunkError,
-				Err:  &core.ProviderError{Kind: core.ErrTimeout, Provider: c.id, Model: model, Message: err.Error(), Cause: err},
-			}
+			sendStreamError(ctx, out, core.ErrTimeout, c.id, model, err)
 		}
 		if !terminalSeen {
-			out <- core.StreamChunk{
-				Type:  core.ChunkText,
-				Delta: formatResponsesFailureAndDone(),
-			}
+			sendStreamError(ctx, out, core.ErrResponseIntegrity, c.id, model, errors.New("provider stream ended without a terminal event"))
 		}
 	}()
 	return out, nil

@@ -123,12 +123,12 @@ var configs = map[string]ProviderConfig{
 		UserInfoURL:      "https://api.anthropic.com/v1/me",
 	},
 	"codex": {
-		Provider:                  "codex",
-		Flow:                      FlowAuthCodePKCE,
-		ClientID:                  "app_EMoamEEZ73f0CkXaXp7hrann",
-		AuthorizeURL:              "https://auth.openai.com/oauth/authorize",
-		TokenURL:                  "https://auth.openai.com/oauth/token",
-		Scopes:                    []string{"openid", "profile", "email", "offline_access"},
+		Provider:     "codex",
+		Flow:         FlowAuthCodePKCE,
+		ClientID:     "app_EMoamEEZ73f0CkXaXp7hrann",
+		AuthorizeURL: "https://auth.openai.com/oauth/authorize",
+		TokenURL:     "https://auth.openai.com/oauth/token",
+		Scopes:       []string{"openid", "profile", "email", "offline_access"},
 		// prompt=login forces a fresh Auth0 session per flow. Without it, a
 		// second Codex OAuth on the same browser reuses the first session and
 		// Auth0 invalidates the earlier account's refresh-token family as a
@@ -271,23 +271,6 @@ var configs = map[string]ProviderConfig{
 		ExtraTokenParams: map[string]string{
 			"client_type": "extension",
 		},
-	},
-	// Grok CLI signs in with an xAI account via device code and spends Grok
-	// Build subscription credits through cli-chat-proxy.grok.com. It reuses
-	// the public xAI OAuth client id and the auth.x.ai token endpoints.
-	"grok-cli": {
-		Provider:      "grok-cli",
-		Flow:          FlowDeviceCode,
-		ClientID:      "b1a00492-073a-47ea-816f-4c329264a828",
-		DeviceCodeURL: "https://auth.x.ai/oauth2/device/code",
-		TokenURL:      "https://auth.x.ai/oauth2/token",
-		RefreshURL:    "https://auth.x.ai/oauth2/token",
-		Scopes: []string{
-			"openid", "profile", "email", "offline_access",
-			"grok-cli:access", "api:access",
-			"conversations:read", "conversations:write",
-		},
-		UserInfoURL: "https://auth.x.ai/oauth2/userinfo",
 	},
 }
 

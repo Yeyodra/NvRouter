@@ -414,6 +414,11 @@ func (s *Server) importN9routerConnections(ctx context.Context, doc map[string]j
 			res.Errors = append(res.Errors, fmt.Sprintf("connection %s: Tasklet requires a non-empty session token API key", c.ID))
 			continue
 		}
+		if provider == "grok-cli" && (authKind != store.AuthOAuth || strings.TrimSpace(c.AccessToken) == "" || strings.TrimSpace(c.RefreshToken) == "") {
+			res.Skipped++
+			res.Errors = append(res.Errors, fmt.Sprintf("connection %s: Grok CLI requires non-empty OAuth access and refresh tokens", c.ID))
+			continue
+		}
 		secret.ExpiresAt = parseRFC3339(c.ExpiresAt)
 		secret.Metadata = meta
 		if err := s.vault.Seal(&acc, secret); err != nil {
@@ -1002,6 +1007,13 @@ var psdKeyRemap = map[string]map[string]string{
 	"qoder": {
 		"userId":    "user_id",
 		"machineId": "machine_id",
+	},
+	"grok-cli": {
+		// The dedicated connector accepts both forms, but preserving the 9router
+		// keys keeps foreign imports and native OAuth-created accounts identical.
+		"userId":   "userId",
+		"deviceId": "deviceId",
+		"agentId":  "agentId",
 	},
 }
 

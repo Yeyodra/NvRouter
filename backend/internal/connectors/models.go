@@ -359,11 +359,7 @@ var providerModels = map[string][]ModelSpec{
 		m("cline-pass/qwen3.7-max", "Qwen3.7 Max (ClinePass)"),
 		m("cline-pass/qwen3.7-plus", "Qwen3.7 Plus (ClinePass)"),
 	},
-	"grok-cli": {
-		m("grok-build", "Grok Build"), m("grok-4.5", "Grok 4.5"),
-		m("grok-4.5-high", "Grok 4.5 (High)"), m("grok-4.5-medium", "Grok 4.5 (Medium)"),
-		m("grok-4.5-low", "Grok 4.5 (Low)"),
-	},
+
 	"venice": {
 		m("venice-uncensored-1-2", "Venice Uncensored 1.2"), m("zai-org-glm-5", "GLM-5"),
 		m("qwen3-235b-a22b-instruct-2507", "Qwen3 235B A22B Instruct"),

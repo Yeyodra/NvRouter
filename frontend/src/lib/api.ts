@@ -1064,12 +1064,12 @@ function browserTZ(): string {
   }
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
   const res = await fetchWithTimeout(`/api${path}`, {
     method,
     headers: body ? { "Content-Type": "application/json" } : undefined,
     body: body ? JSON.stringify(body) : undefined,
-  });
+  }, timeoutMs);
   if (!res.ok) {
     let message = res.statusText;
     try {

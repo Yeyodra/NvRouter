@@ -3,6 +3,7 @@ package connectors
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -499,4 +500,60 @@ func TestGrokCLI_PatchBody_GrokBuildNoEffort(t *testing.T) {
 	reasoning := m["reasoning"].(map[string]any)
 	_, hasEffort := reasoning["effort"]
 	require.False(t, hasEffort)
+}
+
+func TestGrokCLI_RenderBody_CrossProviderToolHistory(t *testing.T) {
+	c := NewGrokCLI("grok-cli", "https://cli-chat-proxy.grok.com/v1")
+	req := &core.ChatRequest{
+		Model: "grok-4.5",
+		Messages: []core.Message{
+			{Role: core.RoleAssistant, Content: []core.ContentPart{
+				{Type: core.PartThinking, Text: "foreign summary", Signature: "openai-ciphertext"},
+				{Type: core.PartToolCall, ToolCall: &core.ToolCall{ID: "call-custom", Name: "exec", Arguments: json.RawMessage(`{"input":"run this"}`), Kind: core.ToolCallCustom}},
+			}},
+			{Role: core.RoleTool, Content: []core.ContentPart{{Type: core.PartToolResult, ToolResult: &core.ToolResult{CallID: "call-custom", Content: `[{"type":"input_text","text":"done"}]`}}}},
+			{Role: core.RoleUser, Content: []core.ContentPart{{Type: core.PartText, Text: "continue"}}},
+		},
+		Tools: []core.Tool{{Name: "exec", Description: "Run command", Kind: core.ToolCustom}},
+	}
+	body, _, err := c.renderBody(req)
+	require.NoError(t, err)
+
+	var out map[string]any
+	require.NoError(t, json.Unmarshal(body, &out))
+	input := out["input"].([]any)
+	for _, item := range input {
+		m, _ := item.(map[string]any)
+		require.NotEqual(t, "reasoning", m["type"], "foreign encrypted reasoning must not be replayed to Grok")
+	}
+	require.Equal(t, "function_call", input[0].(map[string]any)["type"])
+	require.Equal(t, "call-custom", input[0].(map[string]any)["call_id"])
+	require.Equal(t, "function_call_output", input[1].(map[string]any)["type"])
+	require.Equal(t, "call-custom", input[1].(map[string]any)["call_id"])
+
+	tools := out["tools"].([]any)
+	tool := tools[0].(map[string]any)
+	require.Equal(t, "function", tool["type"])
+	require.Equal(t, map[string]any{
+		"type": "object", "properties": map[string]any{"input": map[string]any{"type": "string"}}, "required": []any{"input"},
+	}, tool["parameters"])
+}
+
+func TestGrokCLI_StreamFailsClosedWithoutTerminalEvent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n")
+	}))
+	defer srv.Close()
+
+	c := NewGrokCLI("grok-cli", srv.URL)
+	stream, err := c.Stream(context.Background(), &core.ChatRequest{Model: "grok-build", Messages: []core.Message{{Role: core.RoleUser, Content: []core.ContentPart{{Type: core.PartText, Text: "hi"}}}}}, core.Credentials{AccessToken: "tok"}, core.StreamConfig{})
+	require.NoError(t, err)
+	var gotIntegrity bool
+	for chunk := range stream {
+		if pe := core.AsProviderError(chunk.Err); chunk.Type == core.ChunkError && pe.Kind == core.ErrResponseIntegrity {
+			gotIntegrity = true
+		}
+	}
+	require.True(t, gotIntegrity)
 }
