@@ -102,6 +102,8 @@ export function ProviderDetailPage() {
   const [baseURL, setBaseURL] = useState("");
   const [region, setRegion] = useState("");
   const [accountID, setAccountID] = useState("");
+  const [workspaceID, setWorkspaceID] = useState("");
+  const [organizationID, setOrganizationID] = useState("");
   const [azureEndpoint, setAzureEndpoint] = useState("");
   const [azureDeployment, setAzureDeployment] = useState("");
   const [azureAPIVersion, setAzureAPIVersion] = useState("2024-10-01-preview");
@@ -203,6 +205,8 @@ export function ProviderDetailPage() {
         base_url: baseURL || undefined,
         region: hasRegions ? region : undefined,
         account_id: accountID || undefined,
+        workspace_id: workspaceID || undefined,
+        organization_id: organizationID || undefined,
         azure_endpoint: azureEndpoint || undefined,
         azure_deployment: azureDeployment || undefined,
         azure_api_version: azureAPIVersion || undefined,
@@ -214,6 +218,8 @@ export function ProviderDetailPage() {
       setApiKey("");
       setBaseURL("");
       setAccountID("");
+      setWorkspaceID("");
+      setOrganizationID("");
       setAzureEndpoint("");
       setAzureDeployment("");
       setAzureAPIVersion("2024-10-01-preview");
@@ -916,6 +922,8 @@ export function ProviderDetailPage() {
           baseURL={baseURL}
           region={region}
           accountID={accountID}
+          workspaceID={workspaceID}
+          organizationID={organizationID}
           azureEndpoint={azureEndpoint}
           azureDeployment={azureDeployment}
           azureAPIVersion={azureAPIVersion}
@@ -927,6 +935,8 @@ export function ProviderDetailPage() {
           onBaseURL={setBaseURL}
           onRegion={setRegion}
           onAccountID={setAccountID}
+          onWorkspaceID={setWorkspaceID}
+          onOrganizationID={setOrganizationID}
           onAzureEndpoint={setAzureEndpoint}
           onAzureDeployment={setAzureDeployment}
           onAzureAPIVersion={setAzureAPIVersion}
@@ -1804,6 +1814,8 @@ function AddApiKeyModal({
   baseURL,
   region,
   accountID,
+  workspaceID,
+  organizationID,
   azureEndpoint,
   azureDeployment,
   azureAPIVersion,
@@ -1815,6 +1827,8 @@ function AddApiKeyModal({
   onBaseURL,
   onRegion,
   onAccountID,
+  onWorkspaceID,
+  onOrganizationID,
   onAzureEndpoint,
   onAzureDeployment,
   onAzureAPIVersion,
@@ -1829,6 +1843,8 @@ function AddApiKeyModal({
   baseURL: string;
   region: string;
   accountID: string;
+  workspaceID: string;
+  organizationID: string;
   azureEndpoint: string;
   azureDeployment: string;
   azureAPIVersion: string;
@@ -1840,6 +1856,8 @@ function AddApiKeyModal({
   onBaseURL: (v: string) => void;
   onRegion: (v: string) => void;
   onAccountID: (v: string) => void;
+  onWorkspaceID: (v: string) => void;
+  onOrganizationID: (v: string) => void;
   onAzureEndpoint: (v: string) => void;
   onAzureDeployment: (v: string) => void;
   onAzureAPIVersion: (v: string) => void;
@@ -1858,6 +1876,7 @@ function AddApiKeyModal({
   const apiKeyOptional = supportsNone && supportsApiKey;
   const isAzure = provider.id === "azure";
   const isCloudflare = provider.id === "cloudflare-ai";
+  const isTasklet = provider.id === "tasklet";
   // A user-created custom provider instance carries its own base URL (set when
   // the provider was created), so its accounts inherit it — asking for a base
   // URL again per API key is redundant and confusing.
@@ -1887,6 +1906,8 @@ function AddApiKeyModal({
         base_url: baseURL || undefined,
         region: hasRegions ? region : undefined,
         account_id: accountID || undefined,
+        workspace_id: workspaceID || undefined,
+        organization_id: organizationID || undefined,
         azure_endpoint: azureEndpoint || undefined,
         azure_deployment: azureDeployment || undefined,
         azure_api_version: azureAPIVersion || undefined,
@@ -1936,10 +1957,23 @@ function AddApiKeyModal({
                 type="password"
                 value={apiKey}
                 onChange={(e) => { onApiKey(e.target.value); setCheckStatus("idle"); }}
-                placeholder={isCloudflare ? "CF API token (v1.0-...)" : provider.id === "xai" ? "xai-..." : "sk-..."}
+                placeholder={isCloudflare ? "CF API token (v1.0-...)" : isTasklet ? "Tasklet session token" : provider.id === "xai" ? "xai-..." : "sk-..."}
                 required={!apiKeyOptional}
               />
             </Field>
+          )}
+          {isTasklet && (
+            <div className="space-y-3 rounded-xl border border-[var(--border)] bg-[var(--bg-subtle)] p-4">
+              <p className="text-xs text-[var(--text-muted)]">
+                Workspace and organization IDs are optional; organization ID enables quota display.
+              </p>
+              <Field label="Workspace ID (optional)">
+                <Input value={workspaceID} onChange={(e) => { onWorkspaceID(e.target.value); setCheckStatus("idle"); }} placeholder="workspace_..." />
+              </Field>
+              <Field label="Organization ID (optional)">
+                <Input value={organizationID} onChange={(e) => { onOrganizationID(e.target.value); setCheckStatus("idle"); }} placeholder="organization_..." />
+              </Field>
+            </div>
           )}
           {isCloudflare && (
             <div className="space-y-3">

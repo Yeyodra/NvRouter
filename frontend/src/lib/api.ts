@@ -275,6 +275,8 @@ export interface AccountInput {
   base_url?: string;
   region?: string;
   account_id?: string;
+  workspace_id?: string;
+  organization_id?: string;
   azure_endpoint?: string;
   azure_deployment?: string;
   azure_api_version?: string;

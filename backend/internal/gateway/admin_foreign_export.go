@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// exportN9routerEnter emits plaintext only after the caller explicitly selects
+// exportN9routerEnter emits plaintext subscription accounts only after the caller explicitly selects
 // the 9router format and acknowledges secret inclusion.
 func (s *Server) exportN9routerEnter(w http.ResponseWriter, r *http.Request) {
 	accounts, err := s.accounts.ListByTenant(r.Context(), adminTenant)
@@ -15,12 +15,12 @@ func (s *Server) exportN9routerEnter(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]map[string]any, 0)
 	for _, account := range accounts {
-		if account.Provider != "enter-converge" {
+		if account.Provider != "enter-converge" && account.Provider != "tasklet" {
 			continue
 		}
 		creds, err := s.vault.Open(account)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "decrypt Enter Converge account failed")
+			writeError(w, http.StatusInternalServerError, "decrypt provider account failed")
 			return
 		}
 		row := map[string]any{
@@ -32,7 +32,14 @@ func (s *Server) exportN9routerEnter(w http.ResponseWriter, r *http.Request) {
 		if workspace := firstString(creds.Extra["workspaceId"], creds.Extra["workspace_id"]); workspace != "" {
 			psd["workspaceId"] = workspace
 		}
+		if organization := firstString(creds.Extra["organizationId"], creds.Extra["organization_id"]); organization != "" {
+			psd["organizationId"] = organization
+		}
 		row["providerSpecificData"] = psd
+		if account.Provider == "tasklet" {
+			out = append(out, row)
+			continue
+		}
 		locks, err := s.db.Routing().ListModelCooldowns(r.Context(), account.ID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "list model cooldowns failed")

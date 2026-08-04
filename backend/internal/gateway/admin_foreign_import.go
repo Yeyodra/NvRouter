@@ -409,6 +409,11 @@ func (s *Server) importN9routerConnections(ctx context.Context, doc map[string]j
 			res.Errors = append(res.Errors, fmt.Sprintf("connection %s: Enter Converge requires an ek_ API key", c.ID))
 			continue
 		}
+		if provider == "tasklet" && (authKind != store.AuthAPIKey || strings.TrimSpace(c.APIKey) == "") {
+			res.Skipped++
+			res.Errors = append(res.Errors, fmt.Sprintf("connection %s: Tasklet requires a non-empty session token API key", c.ID))
+			continue
+		}
 		secret.ExpiresAt = parseRFC3339(c.ExpiresAt)
 		secret.Metadata = meta
 		if err := s.vault.Seal(&acc, secret); err != nil {

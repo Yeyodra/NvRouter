@@ -87,6 +87,10 @@ func DefaultRegistry() *Registry {
 			conns = append(conns, ec)
 			RegisterLiveModelSource(p.ID, ec)
 			RegisterQuotaSource(p.ID, ec)
+		case p.ID == "tasklet":
+			t := NewTasklet(p.BaseURL)
+			conns = append(conns, t)
+			RegisterQuotaSource(p.ID, t)
 		case webOnlyProviders[p.ID]:
 			conns = append(conns, NewWebConnector(p.ID, p.BaseURL))
 		case p.Dialect == core.DialectAnthropic:

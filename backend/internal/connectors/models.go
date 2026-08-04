@@ -42,6 +42,16 @@ func emb(id, name string, dims int) ModelSpec {
 // Providers marked passthrough upstream (openrouter, vercel, ...) accept any
 // model id, so their listed set here is only a discovery hint, not an allow-list.
 var providerModels = map[string][]ModelSpec{
+	"tasklet": {
+		m("claude-haiku-4.5", "Claude Haiku 4.5"), m("claude-sonnet-4.6", "Claude Sonnet 4.6"), m("claude-sonnet-5", "Claude Sonnet 5"),
+		m("claude-opus-4.6", "Claude Opus 4.6"), m("claude-opus-4.7", "Claude Opus 4.7"), m("claude-opus-4.8", "Claude Opus 4.8"),
+		m("claude-opus-4.8-fast", "Claude Opus 4.8 Fast"), m("claude-opus-5", "Claude Opus 5"), m("claude-fable-5", "Claude Fable 5"),
+		m("gpt-5.5", "GPT 5.5"), m("gpt-5.5-fast", "GPT 5.5 Fast"), m("gpt-5.6-sol", "GPT 5.6 Sol"),
+		m("gpt-5.6-terra", "GPT 5.6 Terra"), m("gpt-5.6-luna", "GPT 5.6 Luna"),
+		m("gemini-flash-3-preview", "Gemini Flash 3 Preview"), m("gemini-flash-3.5", "Gemini Flash 3.5"), m("gemini-flash-3.6", "Gemini Flash 3.6"),
+		m("gemini-flash-lite-3.1", "Gemini Flash Lite 3.1"), m("gemini-flash-lite-3.5", "Gemini Flash Lite 3.5"), m("gemini-pro-3.1-preview", "Gemini Pro 3.1 Preview"),
+		m("grok-4.5", "Grok 4.5"), m("kimi-k3", "Kimi K3"), m("muse-spark-1.1", "Muse Spark 1.1"),
+	},
 	"enter-converge": {
 		m("openai/gpt-5.6-sol", "GPT 5.6 Sol"), m("openai/gpt-5.6-terra", "GPT 5.6 Terra"), m("openai/gpt-5.6-luna", "GPT 5.6 Luna"),
 		m("openai/gpt-5.5", "GPT 5.5"), m("openai/gpt-5.4-pro", "GPT 5.4 Pro"), m("openai/gpt-5.4", "GPT 5.4"), m("openai/gpt-5.2-pro", "GPT 5.2 Pro"),

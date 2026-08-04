@@ -603,6 +603,7 @@ func (s *Server) adminCreateAccount(w http.ResponseWriter, r *http.Request) {
 		Region            string `json:"region"`
 		AccountID         string `json:"account_id"`
 		WorkspaceID       string `json:"workspace_id"`
+		OrganizationID    string `json:"organization_id"`
 		AzureEndpoint     string `json:"azure_endpoint"`
 		AzureDeployment   string `json:"azure_deployment"`
 		AzureAPIVersion   string `json:"azure_api_version"`
@@ -660,6 +661,7 @@ func (s *Server) adminCreateAccount(w http.ResponseWriter, r *http.Request) {
 		Region:            body.Region,
 		AccountID:         body.AccountID,
 		WorkspaceID:       body.WorkspaceID,
+		OrganizationID:    body.OrganizationID,
 		AzureEndpoint:     body.AzureEndpoint,
 		AzureDeployment:   body.AzureDeployment,
 		AzureAPIVersion:   body.AzureAPIVersion,
@@ -970,6 +972,7 @@ func (s *Server) adminValidateKey(w http.ResponseWriter, r *http.Request) {
 		Region            string `json:"region"`
 		AccountID         string `json:"account_id"`
 		WorkspaceID       string `json:"workspace_id"`
+		OrganizationID    string `json:"organization_id"`
 		AzureEndpoint     string `json:"azure_endpoint"`
 		AzureDeployment   string `json:"azure_deployment"`
 		AzureAPIVersion   string `json:"azure_api_version"`
@@ -1021,6 +1024,7 @@ func (s *Server) adminValidateKey(w http.ResponseWriter, r *http.Request) {
 		Region:            body.Region,
 		AccountID:         body.AccountID,
 		WorkspaceID:       body.WorkspaceID,
+		OrganizationID:    body.OrganizationID,
 		AzureEndpoint:     body.AzureEndpoint,
 		AzureDeployment:   body.AzureDeployment,
 		AzureAPIVersion:   body.AzureAPIVersion,
@@ -3092,6 +3096,7 @@ type providerMetadataInput struct {
 	Region            string
 	AccountID         string
 	WorkspaceID       string
+	OrganizationID    string
 	AzureEndpoint     string
 	AzureDeployment   string
 	AzureAPIVersion   string
@@ -3126,6 +3131,13 @@ func providerAccountMetadata(spec connectors.ProviderSpec, in providerMetadataIn
 	case "enter-converge":
 		if workspace := strings.TrimSpace(in.WorkspaceID); workspace != "" {
 			meta["workspace_id"] = workspace
+		}
+	case "tasklet":
+		if workspace := strings.TrimSpace(in.WorkspaceID); workspace != "" {
+			meta["workspace_id"] = workspace
+		}
+		if organization := strings.TrimSpace(in.OrganizationID); organization != "" {
+			meta["organization_id"] = organization
 		}
 	case "cloudflare-ai":
 		accountID := strings.TrimSpace(in.AccountID)

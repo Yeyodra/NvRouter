@@ -87,6 +87,9 @@ type ProviderError struct {
 	AttemptUsage *Usage
 	// Cause is the wrapped underlying error.
 	Cause error
+	// NonReplayable marks an attempt that may already have caused upstream
+	// side effects. Dispatch must surface it instead of trying another account.
+	NonReplayable bool
 }
 
 func (e *ProviderError) Error() string {
@@ -113,6 +116,9 @@ func (e *ProviderError) Retryable() bool {
 // Fallbackable reports whether the dispatcher should advance to the next
 // candidate in the chain rather than surfacing this error to the client.
 func (e *ProviderError) Fallbackable() bool {
+	if e.NonReplayable {
+		return false
+	}
 	switch e.Kind {
 	case ErrBadRequest, ErrBudgetBlocked, ErrPolicyBlocked, ErrClientCanceled:
 		return false

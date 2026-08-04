@@ -219,6 +219,9 @@ func oauthProviders() []ProviderSpec {
 // apiKeyProviders is the large API-key-authenticated provider set.
 func apiKeyProviders() []ProviderSpec {
 	return []ProviderSpec{
+		{ID: "tasklet", DisplayName: "Tasklet", Alias: "tl", Dialect: core.DialectOpenAI,
+			BaseURL: "https://api.tasklet.ai", AuthKind: "api_key", ServiceKinds: llm(),
+			Color: "#7C3AED", Website: "https://tasklet.ai", APIKeyURL: "https://tasklet.ai"},
 		{ID: "enter-converge", DisplayName: "Enter Converge", Alias: "ec", Dialect: core.DialectOpenAI,
 			BaseURL: "https://api.enter.pro/code/api/v1", AuthKind: "api_key", ServiceKinds: llm(),
 			Color: "#6366F1", Website: "https://enter.converge.ai", APIKeyURL: "https://enter.converge.ai"},
