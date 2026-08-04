@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -111,4 +112,108 @@ func TestSession_SigningKeyPersistsAcrossInstances(t *testing.T) {
 	_, err = svc2.EnsureDefaults(ctx)
 	require.NoError(t, err)
 	require.True(t, svc2.VerifySession(token))
+}
+
+func TestSetPasswordRevokesExistingSessions(t *testing.T) {
+	svc, ctx := newTestAuth(t)
+	token, err := svc.IssueSession()
+	require.NoError(t, err)
+	require.True(t, svc.VerifySession(token))
+
+	require.NoError(t, svc.SetPassword(ctx, "replacement-password"))
+	require.False(t, svc.VerifySession(token), "password changes must revoke stolen sessions")
+}
+
+func TestAuthenticateSessionRejectsOldPasswordAfterChange(t *testing.T) {
+	svc, ctx := newTestAuth(t)
+
+	require.NoError(t, svc.SetPassword(ctx, "replacement-password"))
+	_, err := svc.AuthenticateSession(ctx, DefaultPassword)
+	require.ErrorIs(t, err, ErrInvalidPassword)
+
+	token, err := svc.AuthenticateSession(ctx, "replacement-password")
+	require.NoError(t, err)
+	require.True(t, svc.VerifySession(token))
+}
+
+func TestConcurrentOldPasswordLoginCannotSurvivePasswordChange(t *testing.T) {
+	for range 3 {
+		svc, ctx := newTestAuth(t)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		var token string
+		var changeErr error
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			token, _ = svc.AuthenticateSession(ctx, DefaultPassword)
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			changeErr = svc.SetPassword(ctx, "replacement-password")
+		}()
+		close(start)
+		wg.Wait()
+		require.NoError(t, changeErr)
+		if token != "" {
+			require.False(t, svc.VerifySession(token), "old-password session must not survive completed password change")
+		}
+	}
+}
+
+func TestRevokeSessionInvalidatesOnlyLoggedOutToken(t *testing.T) {
+	svc, ctx := newTestAuth(t)
+	loggedOut, err := svc.IssueSession()
+	require.NoError(t, err)
+	otherSession, err := svc.IssueSession()
+	require.NoError(t, err)
+
+	require.NoError(t, svc.RevokeSession(ctx, loggedOut))
+	require.False(t, svc.VerifySession(loggedOut), "logout must revoke the presented token")
+	require.True(t, svc.VerifySession(otherSession), "logout must not terminate unrelated sessions")
+}
+
+func TestRevokedSessionStaysInvalidAfterRestart(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, config.DatabaseConfig{Driver: "sqlite", DSN: ":memory:"}, t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, db.Migrate(ctx))
+	t.Cleanup(func() { _ = db.Close() })
+
+	svc1 := New(db.Settings(), "", time.Hour)
+	_, err = svc1.EnsureDefaults(ctx)
+	require.NoError(t, err)
+	token, err := svc1.IssueSession()
+	require.NoError(t, err)
+	require.NoError(t, svc1.RevokeSession(ctx, token))
+
+	svc2 := New(db.Settings(), "", time.Hour)
+	_, err = svc2.EnsureDefaults(ctx)
+	require.NoError(t, err)
+	require.False(t, svc2.VerifySession(token))
+}
+
+func TestSessionGenerationPersistsAcrossInstances(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, config.DatabaseConfig{Driver: "sqlite", DSN: ":memory:"}, t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, db.Migrate(ctx))
+	t.Cleanup(func() { _ = db.Close() })
+
+	svc1 := New(db.Settings(), "", time.Hour)
+	_, err = svc1.EnsureDefaults(ctx)
+	require.NoError(t, err)
+	oldToken, err := svc1.IssueSession()
+	require.NoError(t, err)
+	require.NoError(t, svc1.SetPassword(ctx, "replacement-password"))
+
+	svc2 := New(db.Settings(), "", time.Hour)
+	_, err = svc2.EnsureDefaults(ctx)
+	require.NoError(t, err)
+	require.False(t, svc2.VerifySession(oldToken))
+	newToken, err := svc2.IssueSession()
+	require.NoError(t, err)
+	require.True(t, svc2.VerifySession(newToken))
 }

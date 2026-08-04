@@ -233,26 +233,13 @@ func (s *Server) routes() chi.Router {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
-	// Version / info endpoint (unauthenticated).
+	// Public readiness metadata intentionally omits the exact build identifier and
+	// route inventory. Authenticated operators can inspect version details in the
+	// dashboard without giving unauthenticated scanners a deployment fingerprint.
 	r.Get("/v1", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"name":    "KeiRouter",
-			"version": s.versionString(),
-			"status":  "ok",
-			"endpoints": []string{
-				"/v1/chat/completions",
-				"/v1/messages",
-				"/v1/responses",
-				"/v1/models",
-				"/v1/embeddings",
-				"/v1/images/generations",
-				"/v1/images/understanding",
-				"/v1/videos/generations",
-				"/v1/audio/speech",
-				"/v1/audio/transcriptions",
-				"/v1/search",
-				"/v1/web/fetch",
-			},
+		writeJSON(w, http.StatusOK, map[string]string{
+			"name":   "KeiRouter",
+			"status": "ok",
 		})
 	})
 

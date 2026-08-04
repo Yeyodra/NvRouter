@@ -82,7 +82,9 @@ func (l *ipLimiter) cleanup() {
 	}
 }
 
-// extractIP extracts the client IP from the request.
+// extractIP uses only the socket peer. Proxy-aware client limiting belongs at
+// the trusted reverse-proxy edge, where forwarded headers are normalized before
+// request handling. The backend never trusts caller-controlled IP headers.
 func extractIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -98,6 +100,13 @@ func (s *Server) loginRateLimiter(next http.Handler) http.Handler {
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := extractIP(r)
+		// A loopback reverse proxy owns public client limiting at the trusted
+		// edge. Bucketing its socket address here would collapse every internet
+		// client into one global lockout bucket.
+		if parsed := net.ParseIP(ip); parsed != nil && parsed.IsLoopback() {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if !limiter.Allow(ip) {
 			writeError(w, http.StatusTooManyRequests, "rate limit exceeded: too many login attempts, please try again later")
 			return

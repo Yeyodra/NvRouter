@@ -1,10 +1,12 @@
 package gateway
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/mydisha/keirouter/backend/internal/auth"
 )
 
 // sessionCookie is the name of the dashboard session cookie.
@@ -35,13 +37,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ok, err := s.auth.VerifyPassword(r.Context(), body.Password)
-	if err != nil || !ok {
+	token, err := s.auth.AuthenticateSession(r.Context(), body.Password)
+	if errors.Is(err, auth.ErrInvalidPassword) {
 		writeError(w, http.StatusUnauthorized, "invalid password")
 		return
 	}
-
-	token, err := s.auth.IssueSession()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create session")
 		return
@@ -54,7 +54,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleLogout(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie(sessionCookie); err == nil {
+		if err := s.auth.RevokeSession(r.Context(), c.Value); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to revoke session")
+			return
+		}
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    "",
