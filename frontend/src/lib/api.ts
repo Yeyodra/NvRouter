@@ -1461,7 +1461,7 @@ export const api = {
   // Foreign config import: convert a 9router or OmniRoute backup JSON into
   // KeiRouter records (accounts re-sealed, api keys re-hashed, combos → chains).
   importForeignConfig: (source: "9router" | "omniroute", config: Record<string, unknown>) =>
-    request<ForeignImportResult>("POST", "/settings/database/import-foreign", { source, config }),
+    request<ForeignImportResult>("POST", "/settings/database/import-foreign", { source, config }, 600_000),
 
   sqliteStatus: () => request<SQLiteStatus>("GET", "/settings/sqlite"),
   backupSQLite: () => requestBlob("GET", "/settings/sqlite/backup"),
