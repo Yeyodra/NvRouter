@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, useMemo } from "react";
 import { useParams, Link, useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Plus, Trash2, Plug, X, Zap, ArrowUp, ArrowDown, CheckCircle, ToggleLeft, ToggleRight, Search, Route, AlertCircle, AlertTriangle, RefreshCw, Globe, Copy, Check, Upload, Loader2, XCircle, Layers, FileText, Download, ChevronDown, Clock3, Package } from "lucide-react";
-import { api, type DeviceCode, type OAuthProvider, type Provider, type Account, type ProxyPool, type UpstreamQuota, type ProviderRoutingSettings, type BulkAccountResult } from "../lib/api";
+import { ArrowLeft, Plus, Trash2, Plug, X, Zap, ArrowUp, ArrowDown, CheckCircle, ToggleLeft, ToggleRight, Search, Route, AlertCircle, AlertTriangle, RefreshCw, Globe, Copy, Check, Upload, Loader2, XCircle, Layers, FileText, Download, ChevronDown, Clock3, Package, FlaskConical } from "lucide-react";
+import { api, type DeviceCode, type OAuthProvider, type Provider, type Account, type ProxyPool, type UpstreamQuota, type ProviderRoutingSettings, type BulkAccountResult, type ModelTestResult } from "../lib/api";
 import { KiroConnectModal } from "../components/KiroConnectModal";
 import { QoderConnectModal } from "../components/QoderConnectModal";
 import { KilocodeConnectModal } from "../components/KilocodeConnectModal";
@@ -127,6 +127,28 @@ export function ProviderDetailPage() {
   // Multi-select state for bulk enable/disable. Holds the ids of selected
   // models; selection persists across pagination and search changes.
   const [selectedModelIds, setSelectedModelIds] = useState<Set<string>>(new Set());
+  const [modelTestResults, setModelTestResults] = useState<Record<string, ModelTestResult | "testing">>({});
+
+  const runModelTest = async (modelId: string) => {
+    if (modelTestResults[modelId] === "testing") return;
+    setModelTestResults((previous) => ({ ...previous, [modelId]: "testing" }));
+    try {
+      const result = await api.testModel({ provider: provider!.id, model: modelId });
+      setModelTestResults((previous) => ({ ...previous, [modelId]: result }));
+    } catch (testError) {
+      setModelTestResults((previous) => ({
+        ...previous,
+        [modelId]: {
+          ok: false,
+          error: testError instanceof Error ? testError.message : "Model test failed",
+          error_type: "network_error",
+          kind: "network_error",
+          upstream_status: 0,
+          latency_ms: 0,
+        },
+      }));
+    }
+  };
 
   const toggleModelSelection = (id: string) => {
     setSelectedModelIds((prev) => {
@@ -836,6 +858,8 @@ export function ProviderDetailPage() {
                         disableModelsMut.mutate([m.id]);
                       }
                     }}
+                    onTest={() => runModelTest(m.id)}
+                    testResult={modelTestResults[m.id]}
                   />
                 ))}
               </div>
@@ -2607,6 +2631,8 @@ function ModelCell({
   selected,
   onToggleSelect,
   onToggleDisable,
+  onTest,
+  testResult,
 }: {
   model: { id: string; name: string; kind: string };
   provider: Provider;
@@ -2614,9 +2640,13 @@ function ModelCell({
   selected?: boolean;
   onToggleSelect?: () => void;
   onToggleDisable?: () => void;
+  onTest: () => void;
+  testResult?: ModelTestResult | "testing";
 }) {
   const [copied, setCopied] = useState(false);
   const fullModel = `${provider.alias || provider.id}/${model.id}`;
+  const testing = testResult === "testing";
+  const testable = !disabled && (!model.kind || model.kind.toLowerCase() === "llm");
 
   const handleCopy = () => {
     navigator.clipboard.writeText(fullModel);
@@ -2660,9 +2690,62 @@ function ModelCell({
         </code>
       </div>
 
+      {testResult && testResult !== "testing" && (
+        <div
+          role="status"
+          className={`mt-4 rounded-lg border px-3 py-2.5 text-xs ${
+            testResult.ok
+              ? "border-accent-200 bg-accent-50/60 text-[var(--text)] dark:border-accent-800 dark:bg-accent-900/20"
+              : "border-[color:var(--color-danger)]/30 bg-[color:var(--color-danger)]/10 text-[color:var(--color-danger)]"
+          }`}
+        >
+          {testResult.ok ? (
+            <>
+              <p className="line-clamp-4 whitespace-pre-wrap break-words leading-5">
+                {testResult.content || "No response content"}
+              </p>
+              <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 border-t border-current/10 pt-2 text-[11px] text-[var(--text-muted)]">
+                <span>{testResult.latency_ms.toLocaleString()} ms</span>
+                <span className="break-all">Model: {testResult.actual_model}</span>
+                <span>Total: {testResult.usage.total_tokens.toLocaleString()}</span>
+                <span>Prompt: {testResult.usage.prompt_tokens.toLocaleString()}</span>
+                <span>Completion: {testResult.usage.completion_tokens.toLocaleString()}</span>
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="break-words leading-5">{testResult.error || "Model test failed"}</p>
+              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] opacity-80">
+                {testResult.error_type && <span>{testResult.error_type.replaceAll("_", " ")}</span>}
+                {testResult.upstream_status > 0 && <span>Upstream HTTP {testResult.upstream_status}</span>}
+                {testResult.latency_ms > 0 && <span>{testResult.latency_ms.toLocaleString()} ms</span>}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       <div className="mt-4 flex items-center justify-between border-t border-[var(--border)] pt-3">
         <span className="text-xs text-[var(--text-muted)]">{disabled ? "Excluded from routing" : "Enabled in catalog"}</span>
         <div className="flex items-center gap-1">
+          {testable && (
+            <button
+              type="button"
+              onClick={onTest}
+              disabled={testing}
+              className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-400/50 disabled:cursor-not-allowed ${
+                testResult !== "testing" && testResult?.ok
+                  ? "bg-accent-100 text-accent-700 dark:bg-accent-900/30 dark:text-accent-300"
+                  : testResult !== "testing" && testResult && !testResult.ok
+                    ? "bg-[color:var(--color-danger)]/10 text-[color:var(--color-danger)]"
+                    : "text-[var(--text-muted)] hover:bg-[var(--bg-subtle)] hover:text-[var(--text)]"
+              }`}
+              title="Test model"
+              aria-label={`Test ${model.name || model.id}`}
+            >
+              {testing ? <Loader2 className="h-4 w-4 animate-spin" /> : <FlaskConical className="h-4 w-4" />}
+            </button>
+          )}
           {onToggleDisable && (
             <button
               type="button"

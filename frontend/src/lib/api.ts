@@ -46,6 +46,37 @@ export interface ProviderModel {
   discovered?: boolean;
 }
 
+export type ModelTestResult =
+  | {
+      ok: true;
+      requested_model: string;
+      provider: string;
+      actual_model: string;
+      account_id: string;
+      content: string;
+      latency_ms: number;
+      usage: {
+        prompt_tokens: number;
+        completion_tokens: number;
+        total_tokens: number;
+      };
+    }
+  | {
+      ok: false;
+      error: string;
+      error_type: string;
+      kind: string;
+      upstream_status: number;
+      latency_ms: number;
+    };
+
+export interface ModelTestInput {
+  provider: string;
+  model: string;
+  account_id?: string;
+  prompt?: string;
+}
+
 // CustomProvider is a user-defined provider instance (OpenAI- or Anthropic-
 // compatible) with its own unique id, base URL, accounts, and models.
 export interface CustomProvider {
@@ -1051,6 +1082,15 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return res.json() as Promise<T>;
 }
 
+async function requestResult<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const res = await fetchWithTimeout(`/api${path}`, {
+    method,
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  return res.json() as Promise<T>;
+}
+
 async function requestBlob(method: string, path: string): Promise<Blob> {
   const res = await fetchWithTimeout(`/api${path}`, { method });
   if (!res.ok) {
@@ -1202,6 +1242,8 @@ export const api = {
       "GET",
       `/providers/${id}/models${kind ? `?kind=${encodeURIComponent(kind)}` : ""}`,
     ),
+  testModel: (input: ModelTestInput) =>
+    requestResult<ModelTestResult>("POST", "/models/test", input),
   providerRouting: (id: string) =>
     request<ProviderRoutingSettings>("GET", `/providers/${id}/routing`),
   updateProviderRouting: (id: string, patch: Partial<ProviderRoutingSettings>) =>

@@ -93,6 +93,7 @@ func (s *Server) mountAdmin(r chi.Router) {
 	r.Post("/skills/{id}", s.adminUpdateSkill)
 	r.Delete("/skills/{id}", s.adminDeleteSkill)
 
+	r.Post("/models/test", s.adminTestModel)
 	r.Get("/models/alias", s.adminListAliases)
 	r.Put("/models/alias", s.adminSetAlias)
 	r.Delete("/models/alias", s.adminDeleteAlias)
