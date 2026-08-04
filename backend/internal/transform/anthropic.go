@@ -529,11 +529,23 @@ func (AnthropicCodec) RenderResponse(resp *core.ChatResponse) ([]byte, error) {
 		"content":     content,
 		"stop_reason": renderAntStop(resp.FinishReason),
 		"usage": map[string]int{
-			"input_tokens":  resp.Usage.PromptTokens,
-			"output_tokens": resp.Usage.CompletionTokens,
+			"input_tokens":                anthropicInputTokens(resp.Usage),
+			"output_tokens":               resp.Usage.CompletionTokens,
+			"cache_read_input_tokens":     resp.Usage.CachedTokens,
+			"cache_creation_input_tokens": resp.Usage.CacheWriteTokens,
 		},
 	}
 	return json.Marshal(out)
+}
+
+// Canonical PromptTokens includes cache reads and writes; Anthropic's
+// input_tokens field excludes the separately reported cache token classes.
+func anthropicInputTokens(u core.Usage) int {
+	input := u.PromptTokens - u.CachedTokens - u.CacheWriteTokens
+	if input < 0 {
+		return 0
+	}
+	return input
 }
 
 func mapAntStop(r string) core.FinishReason {

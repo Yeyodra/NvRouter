@@ -228,7 +228,7 @@ func (c *CloudCode) Chat(ctx context.Context, req *core.ChatRequest, creds core.
 		respBody, err := doJSON(ctx, c.id, req.Model, c.url(creds, false), body, c.headers(creds, false))
 		if err != nil {
 			var pe *core.ProviderError
-			if len(chain) >1&& errors.As(err, &pe) && pe.Kind == core.ErrUpstream {
+			if len(chain) > 1 && errors.As(err, &pe) && pe.Kind == core.ErrUpstream {
 				lastErr = err
 				continue
 			}
@@ -265,7 +265,7 @@ func (c *CloudCode) Stream(ctx context.Context, req *core.ChatRequest, creds cor
 		resp, err = openStream(ctx, c.id, req.Model, c.url(creds, true), body, c.headers(creds, true))
 		if err != nil {
 			var pe *core.ProviderError
-			if len(chain) >1 && errors.As(err, &pe) && pe.Kind == core.ErrUpstream {
+			if len(chain) > 1 && errors.As(err, &pe) && pe.Kind == core.ErrUpstream {
 				lastErr = err
 				continue
 			}
@@ -283,6 +283,7 @@ func (c *CloudCode) Stream(ctx context.Context, req *core.ChatRequest, creds cor
 		defer resp.Body.Close()
 
 		ttft := newTTFTTracker(cfg)
+		parser := c.codec.NewStreamParser()
 
 		scanner := sseScanner(resp.Body)
 		for scanner.Scan() {
@@ -297,9 +298,10 @@ func (c *CloudCode) Stream(ctx context.Context, req *core.ChatRequest, creds cor
 				continue
 			}
 			inner := unwrapCloudCodeResponse([]byte(payload))
-			chunks, perr := c.codec.ParseStreamLine(inner, req.Model)
+			chunks, perr := parser.ParseStreamLine(inner, req.Model)
 			if perr != nil {
-				continue
+				sendStreamError(ctx, out, core.ErrUpstream, c.id, req.Model, perr)
+				return
 			}
 			for _, ch := range chunks {
 				ttft.maybeReport(ch)
@@ -311,10 +313,7 @@ func (c *CloudCode) Stream(ctx context.Context, req *core.ChatRequest, creds cor
 			}
 		}
 		if err := scanner.Err(); err != nil {
-			out <- core.StreamChunk{
-				Type: core.ChunkError,
-				Err:  &core.ProviderError{Kind: core.ErrTimeout, Provider: c.id, Model: req.Model, Message: err.Error(), Cause: err},
-			}
+			sendStreamError(ctx, out, core.ErrTimeout, c.id, req.Model, err)
 		}
 	}()
 	return out, nil

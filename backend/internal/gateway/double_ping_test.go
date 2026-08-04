@@ -68,7 +68,7 @@ func streamUpstreamPingThinkTags() http.HandlerFunc {
 		flush, _ := w.(http.Flusher)
 		for _, l := range []string{
 			`data: {"choices":[{"delta":{"role":"assistant","content":""}}]}`,
-			`data: {"choices":[{"delta":{"content":"Hi!"}}]}`,
+			`data: {"choices":[{"delta":{"content":"Hi<thi"}}]}`,
 			`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`,
 			`data: [DONE]`,
 		} {
@@ -116,6 +116,12 @@ func TestE2E_AnthropicStreamPing_SingleMessage(t *testing.T) {
 			require.Equal(t, 1, starts, "expected exactly 1 message_start, got %d — a second message_start is the 2-turn bug", starts)
 			require.Equal(t, 1, stops, "expected exactly 1 message_stop, got %d", stops)
 			require.LessOrEqual(t, deltas, 1, "expected at most 1 message_delta, got %d — extra message_delta can signal a 2nd turn to clients", deltas)
+			if tc.name == "with_trailing_usage" {
+				require.Contains(t, out, `"output_tokens":2`)
+			}
+			if tc.name == "think_tags" {
+				require.Less(t, strings.Index(out, `"text":"<thi"`), strings.Index(out, `"stop_reason":"end_turn"`), "buffered text must precede terminal finish")
+			}
 		})
 	}
 }

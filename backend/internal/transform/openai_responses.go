@@ -86,6 +86,7 @@ type respTool struct {
 	Name        string          `json:"name,omitempty"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	Format      json.RawMessage `json:"format,omitempty"`
 	Function    *struct {
 		Name        string          `json:"name"`
 		Description string          `json:"description"`
@@ -100,6 +101,7 @@ type respInputItem struct {
 	CallID           string            `json:"call_id,omitempty"`
 	Name             string            `json:"name,omitempty"`
 	Arguments        string            `json:"arguments,omitempty"`
+	Input            string            `json:"input,omitempty"`
 	Output           json.RawMessage   `json:"output,omitempty"`
 	Summary          []respSummaryPart `json:"summary,omitempty"`
 	EncryptedContent string            `json:"encrypted_content,omitempty"`
@@ -145,7 +147,16 @@ func (OpenAIResponsesCodec) ParseRequest(body []byte) (*core.ChatRequest, error)
 		if strings.TrimSpace(name) == "" {
 			continue // hosted tools without a name can't be functions
 		}
-		req.Tools = append(req.Tools, core.Tool{Name: name, Description: desc, Parameters: params})
+		tool := core.Tool{Name: name, Description: desc, Parameters: params}
+		switch t.Type {
+		case "custom":
+			tool.Kind = core.ToolCustom
+			tool.Format = t.Format
+		case "freeform":
+			tool.Kind = core.ToolFreeform
+			tool.Format = t.Format
+		}
+		req.Tools = append(req.Tools, tool)
 	}
 
 	var items []respInputItem
@@ -191,12 +202,16 @@ func (OpenAIResponsesCodec) ParseRequest(body []byte) (*core.ChatRequest, error)
 			msg.Content = append(msg.Content, parseRespContent(item.Content)...)
 			req.Messages = append(req.Messages, msg)
 
-		case "function_call":
+		case "function_call", "custom_tool_call":
 			if strings.TrimSpace(item.Name) == "" {
 				continue
 			}
 			args := json.RawMessage(item.Arguments)
-			if len(args) == 0 {
+			kind := core.ToolCallKind("")
+			if itemType == "custom_tool_call" {
+				args = json.RawMessage(item.Input)
+				kind = core.ToolCallCustom
+			} else if len(args) == 0 {
 				args = json.RawMessage("{}")
 			}
 			msg := core.Message{Role: core.RoleAssistant}
@@ -211,7 +226,7 @@ func (OpenAIResponsesCodec) ParseRequest(body []byte) (*core.ChatRequest, error)
 			}
 			msg.Content = append(msg.Content, core.ContentPart{
 				Type:     core.PartToolCall,
-				ToolCall: &core.ToolCall{ID: item.CallID, Name: item.Name, Arguments: args},
+				ToolCall: &core.ToolCall{ID: item.CallID, Name: item.Name, Arguments: args, Kind: kind},
 			})
 			req.Messages = append(req.Messages, msg)
 
@@ -434,19 +449,20 @@ func (c OpenAIResponsesCodec) RenderRequest(req *core.ChatRequest) ([]byte, erro
 			for _, p := range m.Content {
 				if p.Type == core.PartToolCall && p.ToolCall != nil {
 					args := string(p.ToolCall.Arguments)
-					if args == "" {
+					if args == "" && p.ToolCall.Kind != core.ToolCallCustom {
 						args = "{}"
 					}
 					name := p.ToolCall.Name
 					if name == "" {
 						name = "_unknown"
 					}
-					input = append(input, map[string]any{
-						"type":      "function_call",
-						"call_id":   clampCallID(p.ToolCall.ID),
-						"name":      name,
-						"arguments": args,
-					})
+					item := map[string]any{"type": "function_call", "call_id": clampCallID(p.ToolCall.ID), "name": name, "arguments": args}
+					if p.ToolCall.Kind == core.ToolCallCustom {
+						item["type"] = "custom_tool_call"
+						delete(item, "arguments")
+						item["input"] = args
+					}
+					input = append(input, item)
 				}
 			}
 			// Anthropic clients (Claude Code) send tool_result blocks inside a
@@ -482,6 +498,14 @@ func (c OpenAIResponsesCodec) RenderRequest(req *core.ChatRequest) ([]byte, erro
 	if len(req.Tools) > 0 {
 		var tools []map[string]any
 		for _, t := range req.Tools {
+			if t.Kind == core.ToolCustom || t.Kind == core.ToolFreeform {
+				tool := map[string]any{"type": string(t.Kind), "name": t.Name, "description": t.Description}
+				if len(t.Format) > 0 {
+					tool["format"] = t.Format
+				}
+				tools = append(tools, tool)
+				continue
+			}
 			params := t.Parameters
 			if len(params) == 0 {
 				params = json.RawMessage(`{"type":"object","properties":{}}`)
@@ -532,7 +556,11 @@ func isResponsesReasoningEffortEnabled(effort string) bool {
 // ---- unary response parsing (from Codex/Responses provider) -----------------
 
 type respUnary struct {
-	ID     string `json:"id"`
+	ID                string `json:"id"`
+	Status            string `json:"status"`
+	IncompleteDetails *struct {
+		Reason string `json:"reason"`
+	} `json:"incomplete_details"`
 	Output []struct {
 		Type             string            `json:"type"`
 		Role             string            `json:"role"`
@@ -540,6 +568,7 @@ type respUnary struct {
 		CallID           string            `json:"call_id"`
 		Name             string            `json:"name"`
 		Arguments        string            `json:"arguments"`
+		Input            string            `json:"input"`
 		Summary          []respSummaryPart `json:"summary"`
 		EncryptedContent string            `json:"encrypted_content"`
 	} `json:"output"`
@@ -563,6 +592,12 @@ func (OpenAIResponsesCodec) ParseResponse(body []byte, model string) (*core.Chat
 
 	msg := core.Message{Role: core.RoleAssistant}
 	finish := core.FinishStop
+	if raw.Status == "incomplete" {
+		if raw.IncompleteDetails == nil || raw.IncompleteDetails.Reason == "" {
+			return nil, fmt.Errorf("openai-responses: incomplete response missing reason")
+		}
+		finish = core.FinishLength
+	}
 	for _, item := range raw.Output {
 		switch item.Type {
 		case "reasoning":
@@ -585,12 +620,16 @@ func (OpenAIResponsesCodec) ParseResponse(body []byte, model string) (*core.Chat
 			}
 		case "function_call", "custom_tool_call":
 			args := json.RawMessage(item.Arguments)
-			if len(args) == 0 {
+			kind := core.ToolCallKind("")
+			if item.Type == "custom_tool_call" {
+				args = json.RawMessage(item.Input)
+				kind = core.ToolCallCustom
+			} else if len(args) == 0 {
 				args = json.RawMessage("{}")
 			}
 			msg.Content = append(msg.Content, core.ContentPart{
 				Type:     core.PartToolCall,
-				ToolCall: &core.ToolCall{ID: item.CallID, Name: item.Name, Arguments: args},
+				ToolCall: &core.ToolCall{ID: item.CallID, Name: item.Name, Arguments: args, Kind: kind},
 			})
 			finish = core.FinishToolCalls
 		}
@@ -641,16 +680,16 @@ func (OpenAIResponsesCodec) RenderResponse(resp *core.ChatResponse) ([]byte, err
 		case core.PartToolCall:
 			if p.ToolCall != nil {
 				args := string(p.ToolCall.Arguments)
-				if args == "" {
+				if args == "" && p.ToolCall.Kind != core.ToolCallCustom {
 					args = "{}"
 				}
-				output = append(output, map[string]any{
-					"id":        "fc_" + p.ToolCall.ID,
-					"type":      "function_call",
-					"call_id":   p.ToolCall.ID,
-					"name":      p.ToolCall.Name,
-					"arguments": args,
-				})
+				item := map[string]any{"id": "fc_" + p.ToolCall.ID, "type": "function_call", "call_id": p.ToolCall.ID, "name": p.ToolCall.Name, "arguments": args}
+				if p.ToolCall.Kind == core.ToolCallCustom {
+					item["type"] = "custom_tool_call"
+					delete(item, "arguments")
+					item["input"] = args
+				}
+				output = append(output, item)
 				idx++
 			}
 		}

@@ -16,6 +16,7 @@ import (
 	"github.com/mydisha/keirouter/backend/internal/budget"
 	"github.com/mydisha/keirouter/backend/internal/config"
 	"github.com/mydisha/keirouter/backend/internal/connectors"
+	"github.com/mydisha/keirouter/backend/internal/consolelog"
 	"github.com/mydisha/keirouter/backend/internal/core"
 	"github.com/mydisha/keirouter/backend/internal/crypto"
 	"github.com/mydisha/keirouter/backend/internal/dispatch"
@@ -29,12 +30,14 @@ import (
 
 // e2eHarness wires a full gateway against an in-memory store and a fake upstream.
 type e2eHarness struct {
-	server   *httptest.Server
-	apiKey   string
-	upstream *httptest.Server
+	server     *httptest.Server
+	apiKey     string
+	upstream   *httptest.Server
+	consoleLog *consolelog.Buffer
+	usage      *store.UsageRepo
 }
 
-func newE2E(t *testing.T, upstreamHandler http.HandlerFunc) *e2eHarness {
+func newE2E(t *testing.T, upstreamHandler http.HandlerFunc, registries ...*transform.Registry) *e2eHarness {
 	t.Helper()
 	ctx := context.Background()
 
@@ -85,18 +88,24 @@ func newE2E(t *testing.T, upstreamHandler http.HandlerFunc) *e2eHarness {
 	bud := budget.New(db.Budgets(), db.Usage())
 	pipe := pipeline.New(pipeline.Deps{Dispatcher: disp, Meter: mtr, Budget: bud})
 
+	codecs := transform.DefaultRegistry()
+	if len(registries) > 0 {
+		codecs = registries[0]
+	}
+	conLog := consolelog.New()
 	gw := New(Deps{
-		Config:   config.Default(),
-		Identity: idSvc,
-		Pipeline: pipe,
-		Chains:   db.Chains(),
-		Codecs:   transform.DefaultRegistry(),
+		Config:     config.Default(),
+		Identity:   idSvc,
+		Pipeline:   pipe,
+		Chains:     db.Chains(),
+		Codecs:     codecs,
+		ConsoleLog: conLog,
 	})
 
 	srv := httptest.NewServer(gw.Handler())
 	t.Cleanup(srv.Close)
 
-	return &e2eHarness{server: srv, apiKey: issued.Plaintext, upstream: upstream}
+	return &e2eHarness{server: srv, apiKey: issued.Plaintext, upstream: upstream, consoleLog: conLog, usage: db.Usage()}
 }
 
 func (h *e2eHarness) post(t *testing.T, path, body, auth string) *http.Response {
@@ -192,6 +201,111 @@ func TestE2E_AnthropicClientToOpenAIProvider(t *testing.T) {
 	require.Len(t, out.Content, 1)
 	require.Equal(t, "hello from upstream", out.Content[0].Text)
 	require.Equal(t, "end_turn", out.StopReason)
+}
+
+func assertStreamFailed(t *testing.T, h *e2eHarness, out string) {
+	t.Helper()
+	require.Contains(t, out, `"type":"upstream_error"`)
+	require.NotContains(t, out, "invalid arguments")
+
+	var failed, completed bool
+	for _, entry := range h.consoleLog.Entries() {
+		failed = failed || strings.HasPrefix(entry.Message, "Request failed")
+		completed = completed || strings.HasPrefix(entry.Message, "Request completed")
+	}
+	require.True(t, failed)
+	require.False(t, completed)
+}
+
+func TestE2E_StreamingToolSanitizerErrorFailsStream(t *testing.T) {
+	for _, finish := range []bool{true, false} {
+		t.Run(fmt.Sprintf("finish=%v", finish), func(t *testing.T) {
+			h := newE2E(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprintln(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"Read","arguments":"["}}]}}]}`)
+				if finish {
+					fmt.Fprintln(w, `data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`)
+				}
+				fmt.Fprintln(w, "data: [DONE]")
+			})
+
+			resp := h.post(t, "/v1/chat/completions", `{"model":"openai/gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"Read","parameters":{"type":"object"}}}]}`, h.apiKey)
+			defer resp.Body.Close()
+			raw, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			assertStreamFailed(t, h, string(raw))
+			recent, err := h.usage.RecentAccurate(context.Background(), store.DefaultTenantID, time.Now().Add(-time.Minute), 10)
+			require.NoError(t, err)
+			require.Len(t, recent, 1)
+			require.Equal(t, "failed", recent[0].Status)
+			require.Equal(t, string(core.ErrResponseIntegrity), recent[0].ErrorKind)
+		})
+	}
+}
+
+type failingRenderCodec struct{ transform.OpenAICodec }
+
+func (failingRenderCodec) RenderStreamChunk(chunk core.StreamChunk, state *transform.StreamState) ([][]byte, error) {
+	if chunk.Type == core.ChunkText {
+		return nil, fmt.Errorf("render failed")
+	}
+	return transform.OpenAICodec{}.RenderStreamChunk(chunk, state)
+}
+
+func TestE2E_DirectMalformedStreamIsNotAccountedAsSuccess(t *testing.T) {
+	h := newE2E(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintln(w, `data: {"choices":[{"delta":{"content":"ok"}}]}`)
+		fmt.Fprintln(w, `data: {bad`)
+	})
+
+	resp := h.post(t, "/v1/chat/completions", `{"model":"openai/gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`, h.apiKey)
+	defer resp.Body.Close()
+	_, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	recent, err := h.usage.RecentAccurate(context.Background(), store.DefaultTenantID, time.Now().Add(-time.Minute), 10)
+	require.NoError(t, err)
+	require.Len(t, recent, 1)
+	require.Equal(t, "failed", recent[0].Status)
+	require.Equal(t, string(core.ErrResponseIntegrity), recent[0].ErrorKind)
+	assertStreamFailed(t, h, string(streamErrorEvent(core.DialectOpenAI, "upstream provider request failed")))
+}
+
+func TestE2E_StreamingRendererErrorFailsStream(t *testing.T) {
+	for _, content := range []string{"text", "<"} {
+		t.Run(content, func(t *testing.T) {
+			codec := failingRenderCodec{}
+			h := newE2E(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":%q}}]}\n\n", content)
+				fmt.Fprintln(w, "data: [DONE]")
+			}, transform.NewRegistry(codec))
+
+			resp := h.post(t, "/v1/chat/completions", `{"model":"openai/gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"Read","parameters":{"type":"object"}}}]}`, h.apiKey)
+			defer resp.Body.Close()
+			raw, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			assertStreamFailed(t, h, string(raw))
+		})
+	}
+}
+
+func TestE2E_AnthropicTranslatedFailureHasNoSuccessTerminal(t *testing.T) {
+	h := newE2E(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintln(w, `data: {"choices":[{"delta":{"content":"partial"}}]}`)
+		fmt.Fprintln(w, `data: {bad`)
+	})
+
+	resp := h.post(t, "/v1/messages", `{"model":"openai/gpt-4o","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, h.apiKey)
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	out := string(raw)
+	require.Contains(t, out, "event: error\n")
+	require.NotContains(t, out, `"stop_reason":"end_turn"`)
+	require.NotContains(t, out, "event: message_stop\n")
 }
 
 func TestE2E_StreamingChat(t *testing.T) {

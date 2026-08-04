@@ -1,6 +1,10 @@
 package connectors
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/mydisha/keirouter/backend/internal/core"
@@ -17,8 +21,8 @@ func TestCopilot_SupportsResponsesEndpoint(t *testing.T) {
 		{"o3", true},
 		{"gemini-2.5-pro", false},
 		{"claude-3.7-sonnet", false},
-		{"GEMINI-PRO", false},   // case-insensitive
-		{"Claude-Opus", false},  // case-insensitive
+		{"GEMINI-PRO", false},  // case-insensitive
+		{"Claude-Opus", false}, // case-insensitive
 	}
 	for _, tc := range cases {
 		if got := c.supportsResponsesEndpoint(tc.model); got != tc.want {
@@ -94,5 +98,45 @@ func TestCopilot_ResponsesURL(t *testing.T) {
 	got = c.responsesURL(core.Credentials{BaseURL: "https://api.githubcopilot.com/chat/completions"})
 	if got != want {
 		t.Errorf("responsesURL with chat suffix = %q, want %q", got, want)
+	}
+}
+
+func TestCopilotResponsesStreamKeepsParserAcrossParallelFrames(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, event := range []string{
+			`{"type":"response.output_item.added","output_index":4,"item":{"type":"function_call","id":"fc_a","call_id":"call_a","name":"first"}}`,
+			`{"type":"response.output_item.added","output_index":7,"item":{"type":"function_call","id":"fc_b","call_id":"call_b","name":"second"}}`,
+			`{"type":"response.function_call_arguments.delta","item_id":"fc_b","delta":"{\"b\":2}"}`,
+			`{"type":"response.function_call_arguments.delta","item_id":"fc_a","delta":"{\"a\":1}"}`,
+			`{"type":"response.failed","response":{"error":{"message":"input exceeds the context window"}}}`,
+		} {
+			fmt.Fprintf(w, "data: %s\n\n", event)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewGitHubCopilot("github_copilot", srv.URL)
+	c.markResponses("gpt-5-codex")
+	stream, err := c.Stream(context.Background(), textReq("gpt-5-codex", true), core.Credentials{}, core.StreamConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []core.StreamChunk
+	for chunk := range stream {
+		got = append(got, chunk)
+	}
+	wantIndices := []int{4, 7, 7, 4}
+	if len(got) != 5 {
+		t.Fatalf("chunks = %#v, want four tool updates and error", got)
+	}
+	for i, want := range wantIndices {
+		if got[i].Type != core.ChunkToolCall || got[i].Index != want {
+			t.Fatalf("chunk[%d] = %#v, want tool index %d", i, got[i], want)
+		}
+	}
+	pe := core.AsProviderError(got[4].Err)
+	if got[4].Type != core.ChunkError || pe.Kind != core.ErrBadRequest || pe.EffectiveScope() != core.FailureScopeRequest {
+		t.Fatalf("error chunk = %#v, want request-scoped bad request", got[4])
 	}
 }

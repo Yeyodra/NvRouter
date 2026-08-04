@@ -9,6 +9,41 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestCommandCodeReasoningDeltaFallback(t *testing.T) {
+	chunks, err := (CommandCodeCodec{}).ParseStreamLine([]byte(`{"type":"reasoning-delta","delta":"think"}`), "model")
+	require.NoError(t, err)
+	require.Len(t, chunks, 1)
+	require.Equal(t, core.ChunkThinking, chunks[0].Type)
+	require.Equal(t, "think", chunks[0].Delta)
+}
+
+func TestCommandCodeParseResponseAssemblesToolLifecycle(t *testing.T) {
+	body := []byte(`{"type":"tool-input-start","id":"call_0","toolName":"weather"}
+{"type":"tool-input-delta","id":"call_0","delta":"{\"city\":"}
+{"type":"tool-input-delta","id":"call_0","delta":"\"Paris\"}"}
+{"type":"finish","finishReason":"tool-calls"}
+`)
+
+	resp, err := (CommandCodeCodec{}).ParseResponse(body, "model")
+	require.NoError(t, err)
+	require.Equal(t, core.FinishToolCalls, resp.FinishReason)
+	require.Len(t, resp.Message.Content, 1)
+	require.Equal(t, core.PartToolCall, resp.Message.Content[0].Type)
+	require.Equal(t, "call_0", resp.Message.Content[0].ToolCall.ID)
+	require.Equal(t, "weather", resp.Message.Content[0].ToolCall.Name)
+	require.JSONEq(t, `{"city":"Paris"}`, string(resp.Message.Content[0].ToolCall.Arguments))
+}
+
+func TestCommandCodeParseResponseRejectsMalformedFinalToolArguments(t *testing.T) {
+	body := []byte(`{"type":"tool-input-start","id":"call_0","toolName":"weather"}
+{"type":"tool-input-delta","id":"call_0","delta":"{\"city\":"}
+{"type":"finish","finishReason":"tool-calls"}
+`)
+
+	_, err := (CommandCodeCodec{}).ParseResponse(body, "model")
+	require.Error(t, err)
+}
+
 func TestOpenAI_ParseRequest_BasicChat(t *testing.T) {
 	body := []byte(`{
 		"model": "gpt-4o",
@@ -166,7 +201,7 @@ func TestOpenAI_ParseStreamLine_ToolArgumentsNestedInputObject(t *testing.T) {
 	require.Len(t, chunks, 1)
 	require.Equal(t, core.ChunkToolCall, chunks[0].Type)
 	require.Equal(t, "Bash", chunks[0].ToolCall.Name)
-	require.JSONEq(t, `{"command":"pwd","description":"show cwd"}`, string(chunks[0].ToolCall.Arguments))
+	require.JSONEq(t, `{"input":{"command":"pwd","description":"show cwd"}}`, string(chunks[0].ToolCall.Arguments))
 }
 
 func TestOpenAI_ParseStreamLine_ToolArgumentsNestedStringObject(t *testing.T) {
@@ -177,7 +212,7 @@ func TestOpenAI_ParseStreamLine_ToolArgumentsNestedStringObject(t *testing.T) {
 	require.Len(t, chunks, 1)
 	require.Equal(t, core.ChunkToolCall, chunks[0].Type)
 	require.Equal(t, "Bash", chunks[0].ToolCall.Name)
-	require.JSONEq(t, `{"command":"pwd","description":"show cwd"}`, string(chunks[0].ToolCall.Arguments))
+	require.JSONEq(t, `{"input":{"command":"pwd","description":"show cwd"}}`, string(chunks[0].ToolCall.Arguments))
 }
 
 func TestOpenAI_ParseStreamLine_ToolArgumentsTopLevelInput(t *testing.T) {
@@ -199,7 +234,7 @@ func TestOpenAI_ParseStreamLine_ToolArgumentsSingleUnknownWrapper(t *testing.T) 
 	require.Len(t, chunks, 1)
 	require.Equal(t, core.ChunkToolCall, chunks[0].Type)
 	require.Equal(t, "TaskCreate", chunks[0].ToolCall.Name)
-	require.JSONEq(t, `{"subject":"Fix Qoder","description":"Debug TaskCreate"}`, string(chunks[0].ToolCall.Arguments))
+	require.JSONEq(t, `{"toolCallInput":{"subject":"Fix Qoder","description":"Debug TaskCreate"}}`, string(chunks[0].ToolCall.Arguments))
 }
 
 func TestOpenAI_ParseStreamLine_ToolArgumentsStringFragment(t *testing.T) {
@@ -223,9 +258,11 @@ func TestAnthropic_ParseStreamEvents(t *testing.T) {
 	stop := []byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}`)
 	chunks, err = AnthropicCodec{}.ParseStreamLine(stop, "claude")
 	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(chunks), 1)
-	require.Equal(t, core.ChunkFinish, chunks[0].Type)
-	require.Equal(t, core.FinishStop, chunks[0].FinishReason)
+	require.Len(t, chunks, 2)
+	require.Equal(t, core.ChunkUsage, chunks[0].Type)
+	require.Equal(t, 42, chunks[0].Usage.CompletionTokens)
+	require.Equal(t, core.ChunkFinish, chunks[1].Type)
+	require.Equal(t, core.FinishStop, chunks[1].FinishReason)
 }
 
 func TestAnthropic_RenderResponse_ToolInputAlwaysObject(t *testing.T) {
@@ -291,8 +328,9 @@ func TestAnthropic_RenderStreamChunk_ArgumentDeltasPassedThrough(t *testing.T) {
 
 	// First chunk: opens the tool_use block (ID + Name).
 	openEvents, err := AnthropicCodec{}.RenderStreamChunk(core.StreamChunk{
-		Type:  core.ChunkToolCall,
-		Index: 0,
+		Type:             core.ChunkToolCall,
+		Index:            0,
+		ToolArgumentMode: core.ToolArgumentDelta,
 		ToolCall: &core.ToolCall{
 			ID:        "toolu_1",
 			Name:      "Bash",
@@ -306,8 +344,9 @@ func TestAnthropic_RenderStreamChunk_ArgumentDeltasPassedThrough(t *testing.T) {
 	fragments := []string{`{"com`, `mand":"`, `ls -la`, `"}`}
 	for _, frag := range fragments {
 		deltaEvents, err := AnthropicCodec{}.RenderStreamChunk(core.StreamChunk{
-			Type:  core.ChunkToolCall,
-			Index: 0,
+			Type:             core.ChunkToolCall,
+			Index:            0,
+			ToolArgumentMode: core.ToolArgumentDelta,
 			ToolCall: &core.ToolCall{
 				Arguments: json.RawMessage(frag),
 			},
@@ -319,11 +358,36 @@ func TestAnthropic_RenderStreamChunk_ArgumentDeltasPassedThrough(t *testing.T) {
 	}
 }
 
+func TestAnthropic_RenderStreamChunk_InvalidCompleteArgsDoNotMutateState(t *testing.T) {
+	state := &StreamState{Model: "claude-x", MessageID: "msg1"}
+	ResetStreamState(state)
+
+	events, err := AnthropicCodec{}.RenderStreamChunk(core.StreamChunk{
+		Type:             core.ChunkToolCall,
+		Index:            0,
+		ToolArgumentMode: core.ToolArgumentComplete,
+		ToolCall: &core.ToolCall{
+			ID:        "toolu_1",
+			Name:      "Read",
+			Arguments: json.RawMessage(`[]`),
+		},
+	}, state)
+
+	require.Error(t, err)
+	require.Empty(t, events)
+	require.Empty(t, state.MessageID)
+	require.False(t, state.OpenedBlock)
+	require.False(t, state.SentRole)
+	require.Zero(t, state.ToolIndex)
+	require.Empty(t, state.Custom)
+}
+
 func TestAnthropic_RenderStreamChunk_ToolInputAlwaysObject(t *testing.T) {
 	state := &StreamState{Model: "claude-x", MessageID: "msg1"}
 	events, err := AnthropicCodec{}.RenderStreamChunk(core.StreamChunk{
-		Type:  core.ChunkToolCall,
-		Index: 0,
+		Type:             core.ChunkToolCall,
+		Index:            0,
+		ToolArgumentMode: core.ToolArgumentDelta,
 		ToolCall: &core.ToolCall{
 			ID:        "toolu_1",
 			Name:      "Read",

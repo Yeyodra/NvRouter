@@ -20,10 +20,10 @@ func TestGemini_ParseStreamLine_TextAndUsage(t *testing.T) {
 	chunks, err = GeminiCodec{}.ParseStreamLine(final, "gemini-2.0-flash")
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(chunks), 2)
-	require.Equal(t, core.ChunkFinish, chunks[0].Type)
-	require.Equal(t, core.FinishStop, chunks[0].FinishReason)
-	require.Equal(t, core.ChunkUsage, chunks[1].Type)
-	require.Equal(t, 4, chunks[1].Usage.TotalTokens)
+	require.Equal(t, core.ChunkUsage, chunks[0].Type)
+	require.Equal(t, 4, chunks[0].Usage.TotalTokens)
+	require.Equal(t, core.ChunkFinish, chunks[1].Type)
+	require.Equal(t, core.FinishStop, chunks[1].FinishReason)
 }
 
 func TestGemini_ParseStreamLine_FunctionCall(t *testing.T) {

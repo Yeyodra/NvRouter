@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -814,73 +815,24 @@ func (c *Kiro) Chat(ctx context.Context, req *core.ChatRequest, creds core.Crede
 		return nil, err
 	}
 
-	msg := core.Message{Role: core.RoleAssistant}
-	var text, thinking string
-	toolCalls := map[string]*core.ToolCall{}
-	var toolOrder []string
-	finish := core.FinishStop
-	var usage core.Usage
-	var streamErr *core.ProviderError
+	resp, err := transform.CollectStreamResponse(stream, req.Model)
+	if err != nil {
+		return nil, err
+	}
 
-	for ch := range stream {
-		switch ch.Type {
-		case core.ChunkText:
-			text += ch.Delta
-		case core.ChunkThinking:
-			thinking += ch.Delta
-		case core.ChunkToolCall:
-			if ch.ToolCall != nil {
-				existing, ok := toolCalls[ch.ToolCall.ID]
-				if !ok {
-					tc := *ch.ToolCall
-					toolCalls[ch.ToolCall.ID] = &tc
-					toolOrder = append(toolOrder, ch.ToolCall.ID)
-				} else if len(ch.ToolCall.Arguments) > 0 {
-					existing.Arguments = append(existing.Arguments, ch.ToolCall.Arguments...)
-				}
-				finish = core.FinishToolCalls
-			}
-		case core.ChunkFinish:
-			if ch.FinishReason != "" {
-				finish = ch.FinishReason
-			}
-		case core.ChunkUsage:
-			if ch.Usage != nil {
-				usage = *ch.Usage
-			}
-		case core.ChunkError:
-			if ch.Err != nil && streamErr == nil {
-				streamErr = core.AsProviderError(ch.Err)
-			}
+	var text string
+	hasTool := false
+	for _, part := range resp.Message.Content {
+		if part.Type == core.PartText {
+			text += part.Text
+		} else if part.Type == core.PartToolCall {
+			hasTool = true
 		}
 	}
-
-	if thinking != "" {
-		msg.Content = append(msg.Content, core.ContentPart{Type: core.PartThinking, Text: thinking})
-	}
-	if text != "" {
-		msg.Content = append(msg.Content, core.ContentPart{Type: core.PartText, Text: text})
-	}
-	for _, id := range toolOrder {
-		tc := toolCalls[id]
-		if len(tc.Arguments) == 0 {
-			tc.Arguments = json.RawMessage("{}")
-		}
-		msg.Content = append(msg.Content, core.ContentPart{Type: core.PartToolCall, ToolCall: tc})
-	}
-
-	if streamErr != nil {
-		if usage.PromptTokens != 0 || usage.CompletionTokens != 0 || usage.TotalTokens != 0 {
-			attemptUsage := usage
-			streamErr.AttemptUsage = &attemptUsage
-		}
-		return nil, streamErr
-	}
-
-	if kind := kiroIntegrityKind(text, len(toolOrder) > 0); kind != "" {
-		attemptUsage := usage
+	if kind := kiroIntegrityKind(text, hasTool); kind != "" {
+		attemptUsage := resp.Usage
 		return nil, &core.ProviderError{
-			Kind:                   core.ErrUpstream,
+			Kind:                   core.ErrResponseIntegrity,
 			Scope:                  core.FailureScopeRequest,
 			Provider:               c.id,
 			Model:                  req.Model,
@@ -890,7 +842,7 @@ func (c *Kiro) Chat(ctx context.Context, req *core.ChatRequest, creds core.Crede
 		}
 	}
 
-	return &core.ChatResponse{Model: req.Model, Message: msg, FinishReason: finish, Usage: usage}, nil
+	return resp, nil
 }
 
 // pipeKiroResponse reads an HTTP eventstream response into a buffered channel,
@@ -904,6 +856,8 @@ func (c *Kiro) pipeKiroResponse(ctx context.Context, resp *http.Response, req *c
 		seenTools := map[string]bool{}
 		hasTool := false
 		usageSeen := false
+		var usage core.Usage
+		finishSeen := false
 		outputChars := 0
 		for {
 			select {
@@ -913,10 +867,25 @@ func (c *Kiro) pipeKiroResponse(ctx context.Context, resp *http.Response, req *c
 			}
 			frame, ferr := parser.next()
 			if ferr != nil {
-				if ferr != errEventStreamEOF {
+				if ferr == errEventStreamEOF && !finishSeen {
+					attemptUsage := usage
+					errChunk := core.StreamChunk{Type: core.ChunkError, Err: &core.ProviderError{
+						Kind: core.ErrResponseIntegrity, Provider: c.id, Model: req.Model,
+						Message: "kiro stream ended without messageStopEvent", AttemptUsage: &attemptUsage,
+					}}
+					select {
+					case ch <- errChunk:
+					case <-ctx.Done():
+						return
+					}
+				} else if ferr != errEventStreamEOF {
+					kind := core.ErrUpstream
+					if errors.Is(ferr, io.ErrUnexpectedEOF) || errors.Is(ferr, errEventStreamIntegrity) {
+						kind = core.ErrResponseIntegrity
+					}
 					errChunk := core.StreamChunk{
 						Type: core.ChunkError,
-						Err:  &core.ProviderError{Kind: core.ErrUpstream, Provider: c.id, Model: req.Model, Message: ferr.Error(), Cause: ferr},
+						Err:  &core.ProviderError{Kind: kind, Provider: c.id, Model: req.Model, Message: ferr.Error(), Cause: ferr},
 					}
 					select {
 					case ch <- errChunk:
@@ -937,8 +906,12 @@ func (c *Kiro) pipeKiroResponse(ctx context.Context, resp *http.Response, req *c
 					copy.Model = req.Model
 					chunk.Err = &copy
 				}
-				if chunk.Type == core.ChunkUsage {
+				if chunk.Type == core.ChunkUsage && chunk.Usage != nil {
 					usageSeen = true
+					usage = *chunk.Usage
+				}
+				if chunk.Type == core.ChunkFinish {
+					finishSeen = true
 				}
 				if chunk.Type == core.ChunkText || chunk.Type == core.ChunkThinking {
 					outputChars += len(chunk.Delta)
@@ -1102,7 +1075,7 @@ func kiroFrameToChunks(frame *eventStreamFrame, seenTools map[string]bool, hasTo
 			chunks = append(chunks, core.StreamChunk{
 				Type: core.ChunkError,
 				Err: &core.ProviderError{
-					Kind:                   core.ErrUpstream,
+					Kind:                   core.ErrResponseIntegrity,
 					Scope:                  core.FailureScopeRequest,
 					Message:                "kiro response integrity check failed: malformed tool call: " + err.Error(),
 					RetrySystemInstruction: kiroRepairInstructions["tool"],
@@ -1235,13 +1208,15 @@ func kiroToolUseChunks(payload []byte, seenTools map[string]bool) ([]core.Stream
 		if !workingSeen[id] {
 			workingSeen[id] = true
 			chunks = append(chunks, core.StreamChunk{
-				Type:     core.ChunkToolCall,
-				ToolCall: &core.ToolCall{ID: id, Name: t.Name, Arguments: json.RawMessage("")},
+				Type:             core.ChunkToolCall,
+				ToolArgumentMode: core.ToolArgumentDelta,
+				ToolCall:         &core.ToolCall{ID: id, Name: t.Name, Arguments: json.RawMessage("")},
 			})
 		}
 		chunks = append(chunks, core.StreamChunk{
-			Type:     core.ChunkToolCall,
-			ToolCall: &core.ToolCall{ID: id, Arguments: args},
+			Type:             core.ChunkToolCall,
+			ToolArgumentMode: core.ToolArgumentComplete,
+			ToolCall:         &core.ToolCall{ID: id, Arguments: args},
 		})
 		return chunks, nil
 	}
@@ -1283,6 +1258,7 @@ func kiroToolUseChunks(payload []byte, seenTools map[string]bool) ([]core.Stream
 
 // errEventStreamEOF signals the stream ended cleanly.
 var errEventStreamEOF = errEventStreamDone{}
+var errEventStreamIntegrity = errors.New("eventstream: malformed response")
 
 type errEventStreamDone struct{}
 
@@ -1328,7 +1304,7 @@ func (p *eventStreamParser) next() (*eventStreamFrame, error) {
 
 	totalLen := int(binary.BigEndian.Uint32(p.buf[0:4]))
 	if totalLen < 16 {
-		return nil, fmt.Errorf("eventstream: invalid frame length %d", totalLen)
+		return nil, fmt.Errorf("%w: invalid frame length %d", errEventStreamIntegrity, totalLen)
 	}
 
 	// Buffer the whole frame.
@@ -1344,7 +1320,11 @@ func (p *eventStreamParser) next() (*eventStreamFrame, error) {
 	frame := p.buf[:totalLen]
 	p.buf = p.buf[totalLen:]
 
-	return decodeEventStreamFrame(frame)
+	decoded, err := decodeEventStreamFrame(frame)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errEventStreamIntegrity, err)
+	}
+	return decoded, nil
 }
 
 // fill reads more bytes into the buffer.

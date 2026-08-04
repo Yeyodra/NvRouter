@@ -3,11 +3,11 @@ package connectors
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/mydisha/keirouter/backend/internal/core"
 	"github.com/mydisha/keirouter/backend/internal/transform"
@@ -187,6 +187,7 @@ func (c *OpenAIResponses) Stream(ctx context.Context, req *core.ChatRequest, cre
 
 		ttft := newTTFTTracker(cfg)
 		terminalSeen := false
+		parser := c.codec.NewStreamParser()
 
 		scanner := sseScanner(resp.Body)
 		for scanner.Scan() {
@@ -200,13 +201,10 @@ func (c *OpenAIResponses) Stream(ctx context.Context, req *core.ChatRequest, cre
 			if !ok {
 				continue
 			}
-			chunks, perr := c.codec.ParseStreamLine([]byte(payload), req.Model)
+			chunks, perr := parser.ParseStreamLine([]byte(payload), req.Model)
 			if perr != nil {
-				// Check if this was a terminal event that failed to parse.
-				if isResponsesTerminalPayload(payload) {
-					terminalSeen = true
-				}
-				continue
+				sendStreamParseError(ctx, out, c.id, req.Model, perr)
+				return
 			}
 			// Track whether we received a terminal event.
 			if isResponsesTerminalPayload(payload) {
@@ -223,20 +221,11 @@ func (c *OpenAIResponses) Stream(ctx context.Context, req *core.ChatRequest, cre
 		}
 		if err := scanner.Err(); err != nil {
 			terminalSeen = true // error is itself terminal
-			out <- core.StreamChunk{
-				Type: core.ChunkError,
-				Err:  &core.ProviderError{Kind: core.ErrTimeout, Provider: c.id, Model: req.Model, Message: err.Error(), Cause: err},
-			}
+			sendStreamError(ctx, out, core.ErrTimeout, c.id, req.Model, err)
 		}
 
-		// If the stream closed without a terminal event (response.completed,
-		// response.failed, or error), synthesize response.failed + [DONE]
-		// so Codex clients don't hang waiting for a terminal event.
 		if !terminalSeen {
-			out <- core.StreamChunk{
-				Type:  core.ChunkText,
-				Delta: formatResponsesFailureAndDone(),
-			}
+			sendStreamError(ctx, out, core.ErrResponseIntegrity, c.id, req.Model, errors.New("provider stream ended without a terminal event"))
 		}
 	}()
 	return out, nil
@@ -255,33 +244,13 @@ func isResponsesTerminalPayload(payload string) bool {
 		return false
 	}
 	switch event.Type {
-	case "response.completed", "response.failed", "error":
+	case "response.completed", "response.incomplete", "response.failed", "error":
 		return true
 	}
 	if event.Response != nil {
-		if event.Response.Status == "completed" || event.Response.Status == "failed" {
+		if event.Response.Status == "completed" || event.Response.Status == "incomplete" || event.Response.Status == "failed" {
 			return true
 		}
 	}
 	return false
-}
-
-// formatResponsesFailureAndDone returns a synthetic response.failed SSE event
-// followed by [DONE], for streams that close before the upstream sent a
-// terminal event. This prevents Codex clients from hanging.
-func formatResponsesFailureAndDone() string {
-	failureEvent := map[string]any{
-		"type": "response.failed",
-		"response": map[string]any{
-			"id":     fmt.Sprintf("resp_%d", time.Now().UnixMilli()),
-			"status": "failed",
-			"error": map[string]any{
-				"type":    "stream_error",
-				"code":    "stream_disconnected",
-				"message": "stream closed before response.completed",
-			},
-		},
-	}
-	b, _ := json.Marshal(failureEvent)
-	return "event: response.failed\ndata: " + string(b) + "\n\ndata: [DONE]\n\n"
 }

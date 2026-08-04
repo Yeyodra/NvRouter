@@ -79,6 +79,53 @@ func TestOpenAICompatible_Stream(t *testing.T) {
 	require.True(t, finished)
 }
 
+func TestOpenAICompatible_StreamDefersFinishUntilValidatedEOF(t *testing.T) {
+	finishWritten := make(chan struct{})
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintln(w, `data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`)
+		w.(http.Flusher).Flush()
+		close(finishWritten)
+		<-release
+		fmt.Fprintln(w, `data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`)
+		fmt.Fprintln(w, `data: {"choices":[{"delta":{"content":"late"}}]}`)
+		fmt.Fprintln(w, "data: [DONE]")
+	}))
+	defer srv.Close()
+
+	ch, err := NewOpenAICompatible("openai", srv.URL).Stream(context.Background(), textReq("gpt-4o", true), core.Credentials{}, core.StreamConfig{})
+	require.NoError(t, err)
+	<-finishWritten
+	var early *core.StreamChunk
+	select {
+	case chunk := <-ch:
+		early = &chunk
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	released = true
+	if early != nil {
+		t.Fatalf("chunk exposed before stream validation: %#v", *early)
+	}
+
+	var chunks []core.StreamChunk
+	for chunk := range ch {
+		chunks = append(chunks, chunk)
+	}
+	require.Len(t, chunks, 2)
+	require.Equal(t, core.ChunkUsage, chunks[0].Type)
+	require.Equal(t, 4, chunks[0].Usage.TotalTokens)
+	require.Equal(t, core.ChunkError, chunks[1].Type)
+	require.Equal(t, core.ErrResponseIntegrity, core.AsProviderError(chunks[1].Err).Kind)
+}
+
 func TestOpenAICompatible_MapsRateLimitError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "30")
@@ -281,7 +328,8 @@ func TestAnthropic_Chat_HTMLResponse(t *testing.T) {
 	_, err := c.Chat(context.Background(), textReq("claude-opus-4-8", false), core.Credentials{APIKey: "sk-x"})
 	require.Error(t, err)
 	pe := core.AsProviderError(err)
-	require.Equal(t, core.ErrUpstream, pe.Kind)
+	require.Equal(t, core.ErrResponseIntegrity, pe.Kind)
+	require.Equal(t, core.FailureScopeRequest, pe.EffectiveScope())
 	require.Equal(t, 0, pe.StatusCode)
 	require.Contains(t, err.Error(), "non-JSON response")
 	require.Contains(t, err.Error(), "/v1")

@@ -3,7 +3,6 @@ package transform
 import (
 	"bytes"
 	"fmt"
-	"strings"
 	"time"
 
 	json "github.com/mydisha/keirouter/backend/internal/fastjson"
@@ -21,6 +20,15 @@ import (
 // stream (text-delta, reasoning-delta, tool-input-*, tool-call, finish-step,
 // finish, error).
 type CommandCodeCodec struct{}
+
+type CommandCodeStreamParser struct {
+	indices  map[string]int
+	terminal bool
+}
+
+func (CommandCodeCodec) NewStreamParser() *CommandCodeStreamParser {
+	return &CommandCodeStreamParser{indices: map[string]int{}}
+}
 
 func (CommandCodeCodec) Dialect() core.Dialect { return core.DialectCommandCode }
 
@@ -158,42 +166,18 @@ func commandCodeContentBlocks(m core.Message) []map[string]any {
 // ParseResponse parses a non-streaming Command Code response. The generate API
 // is stream-first; for a unary call we accumulate the same event types.
 func (CommandCodeCodec) ParseResponse(body []byte, model string) (*core.ChatResponse, error) {
-	// Command Code returns NDJSON even for non-stream; fold all lines through
-	// the streaming parser and assemble a single response.
-	msg := core.Message{Role: core.RoleAssistant}
-	var textBuf strings.Builder
-	finish := core.FinishStop
-	var usage core.Usage
-
+	parser := CommandCodeCodec{}.NewStreamParser()
+	assembler := NewStreamResponseAssembler(model)
 	for _, line := range bytes.Split(body, []byte("\n")) {
-		chunks, err := CommandCodeCodec{}.ParseStreamLine(line, model)
+		chunks, err := parser.ParseStreamLine(line, model)
 		if err != nil {
-			continue
+			return nil, err
 		}
-		for _, ch := range chunks {
-			switch ch.Type {
-			case core.ChunkText:
-				textBuf.WriteString(ch.Delta)
-			case core.ChunkToolCall:
-				if ch.ToolCall != nil {
-					msg.Content = append(msg.Content, core.ContentPart{Type: core.PartToolCall, ToolCall: ch.ToolCall})
-					finish = core.FinishToolCalls
-				}
-			case core.ChunkFinish:
-				if ch.FinishReason != "" {
-					finish = ch.FinishReason
-				}
-			case core.ChunkUsage:
-				if ch.Usage != nil {
-					usage = *ch.Usage
-				}
-			}
+		for _, chunk := range chunks {
+			assembler.Process(chunk)
 		}
 	}
-	if textBuf.Len() > 0 {
-		msg.Content = append([]core.ContentPart{{Type: core.PartText, Text: textBuf.String()}}, msg.Content...)
-	}
-	return &core.ChatResponse{Model: model, Message: msg, FinishReason: finish, Usage: usage}, nil
+	return assembler.Response()
 }
 
 // RenderResponse is not used (Command Code is upstream-only); provided to
@@ -223,7 +207,20 @@ type ccUsage struct {
 }
 
 // ParseStreamLine converts one Command Code NDJSON event into canonical chunks.
-func (CommandCodeCodec) ParseStreamLine(line []byte, _ string) ([]core.StreamChunk, error) {
+func (c CommandCodeCodec) ParseStreamLine(line []byte, model string) ([]core.StreamChunk, error) {
+	return c.NewStreamParser().ParseStreamLine(line, model)
+}
+
+func (p *CommandCodeStreamParser) index(id string) int {
+	if idx, ok := p.indices[id]; ok {
+		return idx
+	}
+	idx := len(p.indices)
+	p.indices[id] = idx
+	return idx
+}
+
+func (p *CommandCodeStreamParser) ParseStreamLine(line []byte, _ string) ([]core.StreamChunk, error) {
 	line = bytes.TrimSpace(line)
 	if len(line) == 0 {
 		return nil, nil
@@ -240,6 +237,9 @@ func (CommandCodeCodec) ParseStreamLine(line []byte, _ string) ([]core.StreamChu
 	if err := json.Unmarshal(line, &ev); err != nil {
 		return nil, fmt.Errorf("commandcode: parse stream event: %w", err)
 	}
+	if p.terminal {
+		return nil, &core.ProviderError{Kind: core.ErrUpstream, Provider: "commandcode", Message: fmt.Sprintf("received %s event after terminal finish", ev.Type)}
+	}
 
 	switch ev.Type {
 	case "text-delta":
@@ -253,46 +253,51 @@ func (CommandCodeCodec) ParseStreamLine(line []byte, _ string) ([]core.StreamChu
 		return []core.StreamChunk{{Type: core.ChunkText, Delta: text}}, nil
 
 	case "reasoning-delta":
-		if ev.Text == "" {
+		text := firstNonEmpty(ev.Text, ev.Delta)
+		if text == "" {
 			return nil, nil
 		}
-		return []core.StreamChunk{{Type: core.ChunkThinking, Delta: ev.Text}}, nil
+		return []core.StreamChunk{{Type: core.ChunkThinking, Delta: text}}, nil
 
 	case "tool-input-start":
 		id := firstNonEmpty(ev.ID, ev.ToolCallID)
 		return []core.StreamChunk{{
-			Type:     core.ChunkToolCall,
-			ToolCall: &core.ToolCall{ID: id, Name: ev.ToolName, Arguments: json.RawMessage("")},
+			Type:             core.ChunkToolCall,
+			Index:            p.index(id),
+			ToolArgumentMode: core.ToolArgumentDelta,
+			ToolCall:         &core.ToolCall{ID: id, Name: ev.ToolName, Arguments: json.RawMessage("")},
 		}}, nil
 
 	case "tool-input-delta":
 		delta := ev.Delta
+		id := firstNonEmpty(ev.ID, ev.ToolCallID)
 		if delta == "" {
 			return nil, nil
 		}
 		return []core.StreamChunk{{
-			Type:     core.ChunkToolCall,
-			ToolCall: &core.ToolCall{Arguments: json.RawMessage(delta)},
+			Type:             core.ChunkToolCall,
+			Index:            p.index(id),
+			ToolArgumentMode: core.ToolArgumentDelta,
+			ToolCall:         &core.ToolCall{ID: id, Arguments: json.RawMessage(delta)},
 		}}, nil
 
 	case "tool-call":
 		args := rawOrEmptyObject(ev.Input)
 		return []core.StreamChunk{{
-			Type:     core.ChunkToolCall,
-			ToolCall: &core.ToolCall{ID: ev.ToolCallID, Name: ev.ToolName, Arguments: args},
+			Type:             core.ChunkToolCall,
+			Index:            p.index(ev.ToolCallID),
+			ToolArgumentMode: core.ToolArgumentComplete,
+			ToolCall:         &core.ToolCall{ID: ev.ToolCallID, Name: ev.ToolName, Arguments: args},
 		}}, nil
 
 	case "finish-step":
-		var chunks []core.StreamChunk
-		if ev.FinishReason != "" {
-			chunks = append(chunks, core.StreamChunk{Type: core.ChunkFinish, FinishReason: mapCCFinish(ev.FinishReason)})
-		}
 		if ev.Usage != nil {
-			chunks = append(chunks, ccUsageChunk(ev.Usage))
+			return []core.StreamChunk{ccUsageChunk(ev.Usage)}, nil
 		}
-		return chunks, nil
+		return nil, nil
 
 	case "finish":
+		p.terminal = true
 		var chunks []core.StreamChunk
 		chunks = append(chunks, core.StreamChunk{Type: core.ChunkFinish, FinishReason: mapCCFinish(ev.FinishReason)})
 		if u := ev.TotalUsage; u != nil {

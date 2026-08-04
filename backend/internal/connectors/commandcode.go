@@ -104,7 +104,7 @@ func (c *CommandCode) Chat(ctx context.Context, req *core.ChatRequest, creds cor
 
 	resp, err := c.codec.ParseResponse(respBody, req.Model)
 	if err != nil {
-		return nil, &core.ProviderError{Kind: core.ErrUpstream, Provider: c.id, Model: req.Model, Message: err.Error(), Cause: err}
+		return nil, responseIntegrityError(c.id, req.Model, err)
 	}
 	return resp, nil
 }
@@ -129,6 +129,7 @@ func (c *CommandCode) Stream(ctx context.Context, req *core.ChatRequest, creds c
 		defer resp.Body.Close()
 
 		ttft := newTTFTTracker(cfg)
+		parser := c.codec.NewStreamParser()
 
 		scanner := sseScanner(resp.Body)
 		for scanner.Scan() {
@@ -140,9 +141,10 @@ func (c *CommandCode) Stream(ctx context.Context, req *core.ChatRequest, creds c
 
 			// NDJSON: pass the raw line straight to the codec (it tolerates an
 			// optional "data:" prefix).
-			chunks, perr := c.codec.ParseStreamLine(scanner.Bytes(), req.Model)
+			chunks, perr := parser.ParseStreamLine(scanner.Bytes(), req.Model)
 			if perr != nil {
-				continue
+				sendStreamError(ctx, out, core.ErrResponseIntegrity, c.id, req.Model, perr)
+				return
 			}
 			for _, ch := range chunks {
 				ttft.maybeReport(ch)
@@ -154,10 +156,7 @@ func (c *CommandCode) Stream(ctx context.Context, req *core.ChatRequest, creds c
 			}
 		}
 		if err := scanner.Err(); err != nil {
-			out <- core.StreamChunk{
-				Type: core.ChunkError,
-				Err:  &core.ProviderError{Kind: core.ErrTimeout, Provider: c.id, Model: req.Model, Message: err.Error(), Cause: err},
-			}
+			sendStreamError(ctx, out, core.ErrTimeout, c.id, req.Model, err)
 		}
 	}()
 	return out, nil

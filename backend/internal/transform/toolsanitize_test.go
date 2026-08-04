@@ -2,6 +2,7 @@ package transform
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -32,7 +33,7 @@ func TestToolArgSanitizer_BuffersAndFlushes(t *testing.T) {
 		ToolCall: &core.ToolCall{
 			ID:        "tc1",
 			Name:      "Read",
-			Arguments: json.RawMessage("{}"),
+			Arguments: nil,
 		},
 	}, func(c core.StreamChunk) { emitted = append(emitted, c) })
 
@@ -292,28 +293,28 @@ func TestSanitizeToolArgs_PassthroughValidArgs(t *testing.T) {
 func TestToolArgSanitizer_SnapshotVsDelta(t *testing.T) {
 	tests := []struct {
 		name     string
+		mode     core.ToolArgumentMode
 		existing string
 		fragment string
 		want     string
 	}{
-		{"empty buffer, first fragment", "", `{"file_path":"/a"}`, `{"file_path":"/a"}`},
-		{"delta append", `{"file_path":`, `"/a"}`, `{"file_path":"/a"}`},
-		{"snapshot repeat", `{"file_path":"/a"}`, `{"file_path":"/a"}`, `{"file_path":"/a"}`},
-		{"snapshot growth", `{"file_path":"/a"`, `{"file_path":"/a"}`, `{"file_path":"/a"}`},
-		{"snapshot longer", `{"file_path":"/a","limit":1`, `{"file_path":"/a","limit":100}`, `{"file_path":"/a","limit":100}`},
-		{"nested object delta", `{"config":`, `{"enabled":true}`, `{"config":{"enabled":true}`},
-		{"delta with repeated chars", `{"command":"ls -l`, `l"}`, `{"command":"ls -ll"}`},
-		{"delta with repeated prefix", `{"path":"/home/user`, `/home/user2"}`, `{"path":"/home/user/home/user2"}`},
+		{"empty buffer, first fragment", core.ToolArgumentDelta, "", `{"file_path":"/a"}`, `{"file_path":"/a"}`},
+		{"delta append", core.ToolArgumentDelta, `{"file_path":`, `"/a"}`, `{"file_path":"/a"}`},
+		{"snapshot repeat", core.ToolArgumentSnapshot, `{"file_path":"/a"}`, `{"file_path":"/a"}`, `{"file_path":"/a"}`},
+		{"snapshot growth", core.ToolArgumentSnapshot, `{"file_path":"/a"`, `{"file_path":"/a"}`, `{"file_path":"/a"}`},
+		{"complete replaces", core.ToolArgumentComplete, `{"file_path":"/a","limit":1`, `{"file_path":"/a","limit":100}`, `{"file_path":"/a","limit":100}`},
+		{"nested object delta", core.ToolArgumentDelta, `{"config":`, `{"enabled":true}`, `{"config":{"enabled":true}`},
+		{"delta with repeated chars", core.ToolArgumentDelta, `{"command":"ls -l`, `l"}`, `{"command":"ls -ll"}`},
+		{"delta with repeated prefix", core.ToolArgumentDelta, `{"path":"/home/user`, `/home/user2"}`, `{"path":"/home/user/home/user2"}`},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			buf := &toolBuffer{}
 			buf.args.WriteString(tt.existing)
-			buf.argsLen = len(tt.existing)
-			appendToolArgs(buf, tt.fragment)
+			applyToolArgs(buf, tt.mode, tt.fragment)
 			if got := buf.args.String(); got != tt.want {
-				t.Errorf("appendToolArgs(%q, %q) = %q, want %q", tt.existing, tt.fragment, got, tt.want)
+				t.Errorf("applyToolArgs(%q, %q) = %q, want %q", tt.existing, tt.fragment, got, tt.want)
 			}
 		})
 	}
@@ -329,15 +330,15 @@ func TestToolArgSanitizer_SnapshotStream(t *testing.T) {
 
 	// Provider sends snapshot growth: each chunk re-sends the full args.
 	s.Process(core.StreamChunk{
-		Type: core.ChunkToolCall, Index: 0,
+		Type: core.ChunkToolCall, Index: 0, ToolArgumentMode: core.ToolArgumentSnapshot,
 		ToolCall: &core.ToolCall{ID: "tc1", Name: "Read", Arguments: json.RawMessage(`{"file_path":"/a"}`)},
 	}, emit)
 	s.Process(core.StreamChunk{
-		Type: core.ChunkToolCall, Index: 0,
+		Type: core.ChunkToolCall, Index: 0, ToolArgumentMode: core.ToolArgumentSnapshot,
 		ToolCall: &core.ToolCall{ID: "tc1", Arguments: json.RawMessage(`{"file_path":"/a","limit":100}`)},
 	}, emit)
 	s.Process(core.StreamChunk{
-		Type: core.ChunkToolCall, Index: 0,
+		Type: core.ChunkToolCall, Index: 0, ToolArgumentMode: core.ToolArgumentSnapshot,
 		ToolCall: &core.ToolCall{ID: "tc1", Arguments: json.RawMessage(`{"file_path":"/a","limit":100,"offset":0}`)},
 	}, emit)
 
@@ -400,6 +401,71 @@ func TestToolArgSanitizer_DoubleFlushIsIdempotent(t *testing.T) {
 // TestToolArgSanitizer_DuplicateChunkFinishDoesNotDoubleEmit verifies that
 // a duplicate ChunkFinish from upstream does not cause double-emission of
 // buffered tool calls.
+func TestToolArgSanitizer_RejectsEveryPostTerminalNonUsageChunk(t *testing.T) {
+	for _, chunk := range []core.StreamChunk{
+		{Type: core.ChunkText, Delta: "late"},
+		{Type: core.ChunkThinking, Delta: "late"},
+		{Type: core.ChunkToolCall, ToolCall: &core.ToolCall{ID: "late", Name: "Read", Arguments: json.RawMessage(`{"file_path":"/late"}`)}},
+		{Type: core.ChunkPing},
+		{Type: core.ChunkError, Err: errors.New("late")},
+	} {
+		t.Run(string(chunk.Type), func(t *testing.T) {
+			s := NewToolArgSanitizer()
+			var emitted []core.StreamChunk
+			emit := func(c core.StreamChunk) { emitted = append(emitted, c) }
+			s.Process(core.StreamChunk{Type: core.ChunkFinish, FinishReason: core.FinishStop}, emit)
+			s.Process(chunk, emit)
+
+			if len(emitted) != 2 || emitted[0].Type != core.ChunkFinish || emitted[1].Type != core.ChunkError {
+				t.Fatalf("emitted = %+v, want finish then integrity error", emitted)
+			}
+			if pe := core.AsProviderError(emitted[1].Err); pe.Kind != core.ErrResponseIntegrity {
+				t.Fatalf("error kind = %q, want response_integrity", pe.Kind)
+			}
+		})
+	}
+}
+
+func TestToolArgSanitizer_AllowsTrailingUsageOnly(t *testing.T) {
+	s := NewToolArgSanitizer()
+	var emitted []core.StreamChunk
+	emit := func(c core.StreamChunk) { emitted = append(emitted, c) }
+	s.Process(core.StreamChunk{Type: core.ChunkFinish, FinishReason: core.FinishStop}, emit)
+	s.Process(core.StreamChunk{Type: core.ChunkUsage, Usage: &core.Usage{PromptTokens: 1}}, emit)
+
+	if len(emitted) != 2 || emitted[1].Type != core.ChunkUsage {
+		t.Fatalf("emitted = %+v, want finish then usage", emitted)
+	}
+}
+
+func TestToolArgSanitizer_FailsClosedOnAmbiguousIdentityTransition(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		first  *core.ToolCall
+		second *core.ToolCall
+	}{
+		{"new name lacks ID", &core.ToolCall{ID: "old", Name: "Read", Arguments: json.RawMessage(`{"file_path":"/old"}`)}, &core.ToolCall{Name: "Write", Arguments: json.RawMessage(`{"file_path":"/new","content":"x"}`)}},
+		{"old identity lacks ID", &core.ToolCall{Name: "Read", Arguments: json.RawMessage(`{"file_path":"/old"}`)}, &core.ToolCall{ID: "new", Name: "Write", Arguments: json.RawMessage(`{"file_path":"/new","content":"x"}`)}},
+		{"same ID conflicts by name", &core.ToolCall{ID: "same", Name: "Read", Arguments: json.RawMessage(`{"file_path":"/old"}`)}, &core.ToolCall{ID: "same", Name: "Write", Arguments: json.RawMessage(`{"file_path":"/new","content":"x"}`)}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewToolArgSanitizer()
+			var emitted []core.StreamChunk
+			emit := func(c core.StreamChunk) { emitted = append(emitted, c) }
+			s.Process(core.StreamChunk{Type: core.ChunkToolCall, Index: 0, ToolCall: tt.first}, emit)
+			s.Process(core.StreamChunk{Type: core.ChunkToolCall, Index: 0, ToolCall: tt.second}, emit)
+			s.Flush(emit)
+
+			if len(emitted) != 1 || emitted[0].Type != core.ChunkError {
+				t.Fatalf("emitted = %+v, want one integrity error and no combined tool call", emitted)
+			}
+			if pe := core.AsProviderError(emitted[0].Err); pe.Kind != core.ErrResponseIntegrity {
+				t.Fatalf("error kind = %q, want response_integrity", pe.Kind)
+			}
+		})
+	}
+}
+
 func TestToolArgSanitizer_DuplicateChunkFinishDoesNotDoubleEmit(t *testing.T) {
 	s := NewToolArgSanitizer()
 	var emitted []core.StreamChunk
@@ -421,16 +487,22 @@ func TestToolArgSanitizer_DuplicateChunkFinishDoesNotDoubleEmit(t *testing.T) {
 		t.Fatalf("after first finish: expected 2 emitted (tool+finish), got %d", len(emitted))
 	}
 
-	// Duplicate ChunkFinish — must NOT re-emit the tool call.
+	// Duplicate ChunkFinish is suppressed, but later usage is preserved.
 	s.Process(core.StreamChunk{Type: core.ChunkFinish, FinishReason: core.FinishToolCalls}, emit)
+	s.Process(core.StreamChunk{Type: core.ChunkUsage, Usage: &core.Usage{TotalTokens: 3}}, emit)
 
-	var toolCalls int
+	var toolCalls, finishes, usages int
 	for _, c := range emitted {
-		if c.Type == core.ChunkToolCall {
+		switch c.Type {
+		case core.ChunkToolCall:
 			toolCalls++
+		case core.ChunkFinish:
+			finishes++
+		case core.ChunkUsage:
+			usages++
 		}
 	}
-	if toolCalls != 1 {
-		t.Fatalf("duplicate finish caused double-emission: expected 1 tool call, got %d", toolCalls)
+	if toolCalls != 1 || finishes != 1 || usages != 1 {
+		t.Fatalf("emitted tool/finish/usage = %d/%d/%d, want 1/1/1", toolCalls, finishes, usages)
 	}
 }

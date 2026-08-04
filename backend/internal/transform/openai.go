@@ -993,12 +993,16 @@ func renderOAIChoice(resp *core.ChatResponse) map[string]any {
 		case core.PartText:
 			text.WriteString(p.Text)
 		case core.PartToolCall:
+			args := string(p.ToolCall.Arguments)
+			if args == "" {
+				args = "{}"
+			}
 			toolCalls = append(toolCalls, map[string]any{
 				"id":   p.ToolCall.ID,
 				"type": "function",
 				"function": map[string]string{
 					"name":      p.ToolCall.Name,
-					"arguments": string(p.ToolCall.Arguments),
+					"arguments": args,
 				},
 			})
 		}

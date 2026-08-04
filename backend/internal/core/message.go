@@ -71,7 +71,12 @@ type ToolCall struct {
 	ID        string          `json:"id"`
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments"`
+	Kind      ToolCallKind    `json:"kind,omitempty"`
 }
+
+type ToolCallKind string
+
+const ToolCallCustom ToolCallKind = "custom"
 
 // ToolResult is the output returned to the model after a tool executes. The
 // slimmer (token-compression) layer targets the Content of these results.

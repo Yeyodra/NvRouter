@@ -3,6 +3,7 @@ package transform
 import (
 	"bytes"
 	"fmt"
+	"sort"
 	"strings"
 
 	json "github.com/mydisha/keirouter/backend/internal/fastjson"
@@ -26,11 +27,17 @@ import (
 
 // respStreamEvent is one Responses SSE data payload.
 type respStreamEvent struct {
-	Type     string          `json:"type"`
-	Delta    string          `json:"delta"`
-	ItemID   string          `json:"item_id"`
-	Item     *respStreamItem `json:"item"`
-	Response *struct {
+	Type        string          `json:"type"`
+	Delta       string          `json:"delta"`
+	Arguments   string          `json:"arguments"`
+	Input       string          `json:"input"`
+	ItemID      string          `json:"item_id"`
+	OutputIndex *int            `json:"output_index"`
+	Item        *respStreamItem `json:"item"`
+	Response    *struct {
+		IncompleteDetails *struct {
+			Reason string `json:"reason"`
+		} `json:"incomplete_details"`
 		Usage *struct {
 			InputTokens        int `json:"input_tokens"`
 			OutputTokens       int `json:"output_tokens"`
@@ -57,8 +64,55 @@ type respStreamItem struct {
 	Name   string `json:"name"`
 }
 
+type respParseState struct {
+	byID        map[string]int
+	sawToolCall bool
+}
+
+func (s *respParseState) responseIndex(ev respStreamEvent) int {
+	ids := []string{ev.ItemID}
+	if ev.Item != nil {
+		ids = append(ids, ev.Item.ID, ev.Item.CallID)
+	}
+	if ev.OutputIndex != nil {
+		for _, id := range ids {
+			if id != "" {
+				s.byID[id] = *ev.OutputIndex
+			}
+		}
+		return *ev.OutputIndex
+	}
+	for _, id := range ids {
+		if idx, ok := s.byID[id]; ok {
+			for _, alias := range ids {
+				if alias != "" {
+					s.byID[alias] = idx
+				}
+			}
+			return idx
+		}
+	}
+	return 0
+}
+
+type ResponsesStreamParser struct {
+	state respParseState
+}
+
+func (OpenAIResponsesCodec) NewStreamParser() *ResponsesStreamParser {
+	return &ResponsesStreamParser{state: respParseState{byID: map[string]int{}}}
+}
+
 // ParseStreamLine converts one Responses SSE event payload into canonical chunks.
-func (OpenAIResponsesCodec) ParseStreamLine(line []byte, _ string) ([]core.StreamChunk, error) {
+func (c OpenAIResponsesCodec) ParseStreamLine(line []byte, model string) ([]core.StreamChunk, error) {
+	return c.NewStreamParser().ParseStreamLine(line, model)
+}
+
+func (p *ResponsesStreamParser) ParseStreamLine(line []byte, model string) ([]core.StreamChunk, error) {
+	return p.state.parse(line, model)
+}
+
+func (s *respParseState) parse(line []byte, _ string) ([]core.StreamChunk, error) {
 	line = bytes.TrimSpace(line)
 	if len(line) == 0 || bytes.Equal(line, []byte("[DONE]")) {
 		return nil, nil
@@ -84,29 +138,70 @@ func (OpenAIResponsesCodec) ParseStreamLine(line []byte, _ string) ([]core.Strea
 
 	case "response.output_item.added":
 		if ev.Item != nil && (ev.Item.Type == "function_call" || ev.Item.Type == "custom_tool_call") {
+			s.sawToolCall = true
+			kind := core.ToolCallKind("")
+			if ev.Item.Type == "custom_tool_call" {
+				kind = core.ToolCallCustom
+			}
 			return []core.StreamChunk{{
-				Type: core.ChunkToolCall,
+				Type:             core.ChunkToolCall,
+				Index:            s.responseIndex(ev),
+				ToolArgumentMode: core.ToolArgumentDelta,
 				ToolCall: &core.ToolCall{
 					ID:        ev.Item.CallID,
 					Name:      ev.Item.Name,
-					Arguments: json.RawMessage("{}"),
+					Arguments: nil,
+					Kind:      kind,
 				},
 			}}, nil
 		}
 		return nil, nil
 
 	case "response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
+		s.sawToolCall = true
 		if ev.Delta == "" {
 			return nil, nil
 		}
+		kind := core.ToolCallKind("")
+		if ev.Type == "response.custom_tool_call_input.delta" {
+			kind = core.ToolCallCustom
+		}
 		return []core.StreamChunk{{
-			Type:     core.ChunkToolCall,
-			ToolCall: &core.ToolCall{Arguments: json.RawMessage(ev.Delta)},
+			Type:             core.ChunkToolCall,
+			Index:            s.responseIndex(ev),
+			ToolArgumentMode: core.ToolArgumentDelta,
+			ToolCall:         &core.ToolCall{Arguments: json.RawMessage(ev.Delta), Kind: kind},
 		}}, nil
 
-	case "response.completed":
-		var chunks []core.StreamChunk
-		chunks = append(chunks, core.StreamChunk{Type: core.ChunkFinish, FinishReason: core.FinishStop})
+	case "response.function_call_arguments.done", "response.custom_tool_call_input.done":
+		s.sawToolCall = true
+		args := ev.Arguments
+		kind := core.ToolCallKind("")
+		if ev.Type == "response.custom_tool_call_input.done" {
+			args = ev.Input
+			kind = core.ToolCallCustom
+		}
+		return []core.StreamChunk{{
+			Type:             core.ChunkToolCall,
+			Index:            s.responseIndex(ev),
+			ToolArgumentMode: core.ToolArgumentComplete,
+			ToolCall:         &core.ToolCall{Arguments: json.RawMessage(args), Kind: kind},
+		}}, nil
+
+	case "response.completed", "response.incomplete":
+		finish := core.FinishStop
+		reason := ""
+		if s.sawToolCall {
+			finish = core.FinishToolCalls
+		}
+		if ev.Type == "response.incomplete" {
+			if ev.Response == nil || ev.Response.IncompleteDetails == nil || ev.Response.IncompleteDetails.Reason == "" {
+				return nil, fmt.Errorf("openai-responses: incomplete response missing reason")
+			}
+			finish = core.FinishLength
+			reason = ev.Response.IncompleteDetails.Reason
+		}
+		chunks := []core.StreamChunk{{Type: core.ChunkFinish, FinishReason: finish, Delta: reason}}
 		if ev.Response != nil && ev.Response.Usage != nil {
 			u := ev.Response.Usage
 			chunks = append(chunks, core.StreamChunk{
@@ -181,17 +276,28 @@ func classifyRespStreamError(msg string) *core.ProviderError {
 // respStreamState tracks per-stream rendering bookkeeping for the Responses
 // event sequence, stashed in StreamState.Custom.
 type respStreamState struct {
-	seq          int
-	started      bool
-	responseID   string
-	msgAdded     bool
-	msgPartAdded bool
-	msgText      string
-	toolAdded    map[int]bool
-	toolCallID   map[int]string
-	toolName     map[int]string
-	toolArgs     map[int]string
-	completed    bool
+	seq           int
+	started       bool
+	responseID    string
+	msgAdded      bool
+	msgPartAdded  bool
+	msgText       string
+	msgIdx        int
+	reasoningIdx  int
+	reasoningText string
+	nextOutput    int
+	toolOutput    map[int]int
+	toolAdded     map[int]bool
+	toolCallID    map[int]string
+	toolName      map[int]string
+	toolKind      map[int]core.ToolCallKind
+	toolArgs      map[int]string
+	usage         *core.Usage
+	finished      bool
+	completed     bool
+	failed        bool
+	finishReason  core.FinishReason
+	finishDetail  string
 }
 
 func respState(state *StreamState) *respStreamState {
@@ -203,9 +309,11 @@ func respState(state *StreamState) *respStreamState {
 	}
 	s := &respStreamState{
 		responseID: "resp_" + firstNonEmpty(state.MessageID, "stream"),
+		toolOutput: map[int]int{},
 		toolAdded:  map[int]bool{},
 		toolCallID: map[int]string{},
 		toolName:   map[int]string{},
+		toolKind:   map[int]core.ToolCallKind{},
 		toolArgs:   map[int]string{},
 	}
 	state.Custom["resp"] = s
@@ -221,6 +329,31 @@ func (OpenAIResponsesCodec) RenderStreamChunk(chunk core.StreamChunk, state *Str
 		data["sequence_number"] = s.seq
 		data["type"] = eventType
 		events = append(events, respEvent(eventType, data))
+	}
+
+	outputIndex := func(kind string, idx int) int {
+		switch kind {
+		case "message":
+			if !s.msgAdded {
+				s.msgIdx = s.nextOutput
+				s.nextOutput++
+			}
+			return s.msgIdx
+		case "reasoning":
+			if _, ok := state.Custom["resp_reasoning_added"]; !ok {
+				s.reasoningIdx = s.nextOutput
+				s.nextOutput++
+			}
+			return s.reasoningIdx
+		default:
+			if output, ok := s.toolOutput[idx]; ok {
+				return output
+			}
+			output := s.nextOutput
+			s.nextOutput++
+			s.toolOutput[idx] = output
+			return output
+		}
 	}
 
 	ensureStarted := func() {
@@ -242,92 +375,148 @@ func (OpenAIResponsesCodec) RenderStreamChunk(chunk core.StreamChunk, state *Str
 	case core.ChunkText:
 		ensureStarted()
 		msgID := "msg_" + s.responseID + "_0"
+		output := outputIndex("message", 0)
 		if !s.msgAdded {
 			s.msgAdded = true
 			emit("response.output_item.added", map[string]any{
-				"output_index": 0,
+				"output_index": output,
 				"item":         map[string]any{"id": msgID, "type": "message", "role": "assistant", "content": []any{}},
 			})
 		}
 		if !s.msgPartAdded {
 			s.msgPartAdded = true
 			emit("response.content_part.added", map[string]any{
-				"item_id": msgID, "output_index": 0, "content_index": 0,
+				"item_id": msgID, "output_index": output, "content_index": 0,
 				"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
 			})
 		}
 		s.msgText += chunk.Delta
 		emit("response.output_text.delta", map[string]any{
-			"item_id": msgID, "output_index": 0, "content_index": 0, "delta": chunk.Delta,
+			"item_id": msgID, "output_index": output, "content_index": 0, "delta": chunk.Delta,
 		})
 
 	case core.ChunkThinking:
 		ensureStarted()
 		rsID := "rs_" + s.responseID + "_0"
+		output := outputIndex("reasoning", 0)
 		if _, ok := state.Custom["resp_reasoning_added"]; !ok {
 			state.Custom["resp_reasoning_added"] = true
 			emit("response.output_item.added", map[string]any{
-				"output_index": 0,
+				"output_index": output,
 				"item":         map[string]any{"id": rsID, "type": "reasoning", "summary": []any{}},
 			})
 		}
+		s.reasoningText += chunk.Delta
 		emit("response.reasoning_summary_text.delta", map[string]any{
-			"item_id": rsID, "output_index": 0, "summary_index": 0, "delta": chunk.Delta,
+			"item_id": rsID, "output_index": output, "summary_index": 0, "delta": chunk.Delta,
 		})
 
 	case core.ChunkToolCall:
 		if chunk.ToolCall == nil {
 			return nil, nil
 		}
+		if chunk.ToolCall.Kind != core.ToolCallCustom && len(chunk.ToolCall.Arguments) > 0 && !validCompleteToolArguments(chunk.ToolCall.Arguments) {
+			return nil, fmt.Errorf("openai responses: tool arguments must be a JSON object")
+		}
 		ensureStarted()
 		idx := chunk.Index
+		if chunk.ToolCall.Kind != "" {
+			s.toolKind[idx] = chunk.ToolCall.Kind
+		}
+		output := outputIndex("tool", idx)
 		if chunk.ToolCall.Name != "" {
 			s.toolName[idx] = chunk.ToolCall.Name
 		}
 		if chunk.ToolCall.ID != "" && !s.toolAdded[idx] {
 			s.toolAdded[idx] = true
 			s.toolCallID[idx] = chunk.ToolCall.ID
-			emit("response.output_item.added", map[string]any{
-				"output_index": idx,
-				"item": map[string]any{
-					"id": "fc_" + chunk.ToolCall.ID, "type": "function_call",
-					"call_id": chunk.ToolCall.ID, "name": s.toolName[idx], "arguments": "",
-				},
-			})
+			item := map[string]any{
+				"id": "fc_" + chunk.ToolCall.ID, "type": "function_call",
+				"call_id": chunk.ToolCall.ID, "name": s.toolName[idx], "arguments": "",
+			}
+			if s.toolKind[idx] == core.ToolCallCustom {
+				item["type"] = "custom_tool_call"
+				delete(item, "arguments")
+				item["input"] = ""
+			}
+			emit("response.output_item.added", map[string]any{"output_index": output, "item": item})
 		}
-		if args := string(chunk.ToolCall.Arguments); args != "" && args != "{}" {
+		if args := string(chunk.ToolCall.Arguments); args != "" && (args != "{}" || s.toolKind[idx] == core.ToolCallCustom) {
 			callID := s.toolCallID[idx]
 			s.toolArgs[idx] += args
-			emit("response.function_call_arguments.delta", map[string]any{
-				"item_id": "fc_" + callID, "output_index": idx, "delta": args,
+			eventType := "response.function_call_arguments.delta"
+			if s.toolKind[idx] == core.ToolCallCustom {
+				eventType = "response.custom_tool_call_input.delta"
+			}
+			emit(eventType, map[string]any{
+				"item_id": "fc_" + callID, "output_index": output, "delta": args,
 			})
 		}
 
 	case core.ChunkFinish:
-		// Close any open message/tool items, then complete.
+		if s.finished {
+			return nil, nil
+		}
+		s.finished = true
+		s.finishReason = chunk.FinishReason
+		s.finishDetail = chunk.Delta
+		// Close any open output items before completing the response.
 		if s.msgAdded {
 			msgID := "msg_" + s.responseID + "_0"
 			emit("response.output_text.done", map[string]any{
-				"item_id": msgID, "output_index": 0, "content_index": 0, "text": s.msgText,
+				"item_id": msgID, "output_index": s.msgIdx, "content_index": 0, "text": s.msgText,
 			})
 			emit("response.output_item.done", map[string]any{
-				"output_index": 0,
+				"output_index": s.msgIdx,
 				"item": map[string]any{
 					"id": msgID, "type": "message", "role": "assistant",
 					"content": []map[string]any{{"type": "output_text", "text": s.msgText, "annotations": []any{}}},
 				},
 			})
 		}
-		for idx, callID := range s.toolCallID {
+		if s.reasoningText != "" {
+			rsID := "rs_" + s.responseID + "_0"
+			emit("response.reasoning_summary_text.done", map[string]any{
+				"item_id": rsID, "output_index": s.reasoningIdx, "summary_index": 0, "text": s.reasoningText,
+			})
+			emit("response.output_item.done", map[string]any{
+				"output_index": s.reasoningIdx,
+				"item": map[string]any{
+					"id": rsID, "type": "reasoning",
+					"summary": []map[string]any{{"type": "summary_text", "text": s.reasoningText}},
+				},
+			})
+		}
+		indices := make([]int, 0, len(s.toolCallID))
+		for idx := range s.toolCallID {
+			indices = append(indices, idx)
+		}
+		sort.Ints(indices)
+		for _, idx := range indices {
+			callID := s.toolCallID[idx]
+			output := s.toolOutput[idx]
 			args := s.toolArgs[idx]
+			if s.toolKind[idx] == core.ToolCallCustom {
+				emit("response.custom_tool_call_input.done", map[string]any{
+					"item_id": "fc_" + callID, "output_index": output, "input": args,
+				})
+				emit("response.output_item.done", map[string]any{
+					"output_index": output,
+					"item": map[string]any{
+						"id": "fc_" + callID, "type": "custom_tool_call",
+						"call_id": callID, "name": s.toolName[idx], "input": args,
+					},
+				})
+				continue
+			}
 			if args == "" {
 				args = "{}"
 			}
 			emit("response.function_call_arguments.done", map[string]any{
-				"item_id": "fc_" + callID, "output_index": idx, "arguments": args,
+				"item_id": "fc_" + callID, "output_index": output, "arguments": args,
 			})
 			emit("response.output_item.done", map[string]any{
-				"output_index": idx,
+				"output_index": output,
 				"item": map[string]any{
 					"id": "fc_" + callID, "type": "function_call",
 					"call_id": callID, "name": s.toolName[idx], "arguments": args,
@@ -336,23 +525,25 @@ func (OpenAIResponsesCodec) RenderStreamChunk(chunk core.StreamChunk, state *Str
 		}
 
 	case core.ChunkUsage:
-		if chunk.Usage == nil {
+		if chunk.Usage != nil {
+			usage := *chunk.Usage
+			s.usage = &usage
+		}
+
+	case core.ChunkError:
+		if s.failed || s.completed {
 			return nil, nil
 		}
 		ensureStarted()
-		if !s.completed {
-			s.completed = true
-			emit("response.completed", map[string]any{
-				"response": map[string]any{
-					"id": s.responseID, "object": "response", "status": "completed",
-					"usage": map[string]int{
-						"input_tokens":  chunk.Usage.PromptTokens,
-						"output_tokens": chunk.Usage.CompletionTokens,
-						"total_tokens":  chunk.Usage.TotalTokens,
-					},
-				},
-			})
+		s.failed = true
+		message := "provider stream failed"
+		if chunk.Err != nil {
+			message = chunk.Err.Error()
 		}
+		emit("response.failed", map[string]any{"response": map[string]any{
+			"id": s.responseID, "object": "response", "status": "failed",
+			"error": map[string]any{"type": "upstream_error", "code": "upstream_error", "message": message},
+		}})
 
 	default:
 		return nil, nil
@@ -360,21 +551,44 @@ func (OpenAIResponsesCodec) RenderStreamChunk(chunk core.StreamChunk, state *Str
 	return events, nil
 }
 
-// RenderStreamDone emits response.completed if no usage chunk already did.
-func (OpenAIResponsesCodec) RenderStreamDone(state *StreamState) [][]byte {
+// RenderStreamDone emits response.completed after all output items are closed.
+func (c OpenAIResponsesCodec) RenderStreamDone(state *StreamState) [][]byte {
 	s := respState(state)
-	if s.completed || !s.started {
+	if s.completed || s.failed || !s.started {
 		return nil
 	}
+	events, _ := c.RenderStreamChunk(core.StreamChunk{Type: core.ChunkFinish}, state)
 	s.completed = true
 	s.seq++
-	return [][]byte{respEvent("response.completed", map[string]any{
-		"type":            "response.completed",
+	status := "completed"
+	eventType := "response.completed"
+	if s.finishReason == core.FinishLength {
+		status = "incomplete"
+		eventType = "response.incomplete"
+	}
+	response := map[string]any{"id": s.responseID, "object": "response", "status": status}
+	if status == "incomplete" {
+		reason := firstNonEmpty(s.finishDetail, "max_output_tokens")
+		response["incomplete_details"] = map[string]any{"reason": reason}
+	}
+	if s.usage != nil {
+		response["usage"] = map[string]any{
+			"input_tokens":  s.usage.PromptTokens,
+			"output_tokens": s.usage.CompletionTokens,
+			"total_tokens":  s.usage.TotalTokens,
+			"input_tokens_details": map[string]int{
+				"cached_tokens": s.usage.CachedTokens,
+			},
+			"output_tokens_details": map[string]int{
+				"reasoning_tokens": s.usage.ReasoningTokens,
+			},
+		}
+	}
+	return append(events, respEvent(eventType, map[string]any{
+		"type":            eventType,
 		"sequence_number": s.seq,
-		"response": map[string]any{
-			"id": s.responseID, "object": "response", "status": "completed",
-		},
-	})}
+		"response":        response,
+	}))
 }
 
 // respEvent formats a Responses API SSE event: "event: <name>\ndata: <json>\n\n".

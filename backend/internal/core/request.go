@@ -90,7 +90,16 @@ type Tool struct {
 	Description string `json:"description,omitempty"`
 	// Parameters is a JSON Schema object describing the tool arguments.
 	Parameters json.RawMessage `json:"parameters,omitempty"`
+	Kind       ToolKind        `json:"kind,omitempty"`
+	Format     json.RawMessage `json:"format,omitempty"`
 }
+
+type ToolKind string
+
+const (
+	ToolCustom   ToolKind = "custom"
+	ToolFreeform ToolKind = "freeform"
+)
 
 // RequestMetadata is router-internal context attached during the pipeline.
 type RequestMetadata struct {

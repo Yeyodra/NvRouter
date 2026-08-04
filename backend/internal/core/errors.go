@@ -21,6 +21,8 @@ const (
 	ErrQuotaExhausted ErrorKind = "quota_exhausted"
 	// ErrUpstream: 5xx / transient upstream fault. Retry then fall back.
 	ErrUpstream ErrorKind = "upstream"
+	// ErrResponseIntegrity: a completed upstream response was malformed or truncated.
+	ErrResponseIntegrity ErrorKind = "response_integrity"
 	// ErrTimeout: stream stalled or request timed out. Retry then fall back.
 	ErrTimeout ErrorKind = "timeout"
 	// ErrBadRequest: 4xx caused by the request itself. Do NOT fall back; surface.
@@ -101,7 +103,7 @@ func (e *ProviderError) Unwrap() error { return e.Cause }
 // account) could succeed.
 func (e *ProviderError) Retryable() bool {
 	switch e.Kind {
-	case ErrUpstream, ErrTimeout, ErrRateLimit:
+	case ErrUpstream, ErrResponseIntegrity, ErrTimeout, ErrRateLimit:
 		return true
 	default:
 		return false

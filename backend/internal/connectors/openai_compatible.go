@@ -3,6 +3,7 @@ package connectors
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -196,61 +197,7 @@ func isStreamRequiredError(err error) bool {
 // drainStreamToResponse consumes a stream channel and folds the chunks into a
 // single ChatResponse. Used by Chat when the provider requires streaming.
 func drainStreamToResponse(stream <-chan core.StreamChunk, model string) (*core.ChatResponse, error) {
-	msg := core.Message{Role: core.RoleAssistant}
-	var text, thinking string
-	toolCalls := map[string]*core.ToolCall{}
-	var toolOrder []string
-	finish := core.FinishStop
-	var usage core.Usage
-
-	for ch := range stream {
-		switch ch.Type {
-		case core.ChunkText:
-			text += ch.Delta
-		case core.ChunkThinking:
-			thinking += ch.Delta
-		case core.ChunkToolCall:
-			if ch.ToolCall != nil {
-				existing, ok := toolCalls[ch.ToolCall.ID]
-				if !ok {
-					tc := *ch.ToolCall
-					toolCalls[ch.ToolCall.ID] = &tc
-					toolOrder = append(toolOrder, ch.ToolCall.ID)
-				} else if len(ch.ToolCall.Arguments) > 0 {
-					existing.Arguments = append(existing.Arguments, ch.ToolCall.Arguments...)
-				}
-				finish = core.FinishToolCalls
-			}
-		case core.ChunkFinish:
-			if ch.FinishReason != "" {
-				finish = ch.FinishReason
-			}
-		case core.ChunkUsage:
-			if ch.Usage != nil {
-				usage = *ch.Usage
-			}
-		case core.ChunkError:
-			if ch.Err != nil {
-				return nil, ch.Err
-			}
-		}
-	}
-
-	if thinking != "" {
-		msg.Content = append(msg.Content, core.ContentPart{Type: core.PartThinking, Text: thinking})
-	}
-	if text != "" {
-		msg.Content = append(msg.Content, core.ContentPart{Type: core.PartText, Text: text})
-	}
-	for _, id := range toolOrder {
-		tc := toolCalls[id]
-		if len(tc.Arguments) == 0 {
-			tc.Arguments = json.RawMessage("{}")
-		}
-		msg.Content = append(msg.Content, core.ContentPart{Type: core.PartToolCall, ToolCall: tc})
-	}
-
-	return &core.ChatResponse{Model: model, Message: msg, FinishReason: finish, Usage: usage}, nil
+	return transform.CollectStreamResponse(stream, model)
 }
 
 func (c *OpenAICompatible) Chat(ctx context.Context, req *core.ChatRequest, creds core.Credentials) (*core.ChatResponse, error) {
@@ -294,7 +241,7 @@ func (c *OpenAICompatible) Chat(ctx context.Context, req *core.ChatRequest, cred
 		defer respBody.Close()
 		resp, perr := sc.ParseResponseFrom(respBody, req.Model)
 		if perr != nil {
-			return nil, &core.ProviderError{Kind: core.ErrUpstream, Provider: c.id, Model: req.Model, Message: perr.Error(), Cause: perr}
+			return nil, responseIntegrityError(c.id, req.Model, perr)
 		}
 		return resp, nil
 	}
@@ -315,7 +262,7 @@ func (c *OpenAICompatible) Chat(ctx context.Context, req *core.ChatRequest, cred
 
 	resp, err := c.codec.ParseResponse(respBody, req.Model)
 	if err != nil {
-		return nil, &core.ProviderError{Kind: core.ErrUpstream, Provider: c.id, Model: req.Model, Message: err.Error(), Cause: err}
+		return nil, responseIntegrityError(c.id, req.Model, err)
 	}
 	return resp, nil
 }
@@ -557,6 +504,8 @@ func (c *OpenAICompatible) Stream(ctx context.Context, req *core.ChatRequest, cr
 		defer resp.Body.Close()
 
 		ttft := newTTFTTracker(cfg)
+		var pendingFinish *core.StreamChunk
+		terminal := false
 
 		scanner := sseScanner(resp.Body)
 		for scanner.Scan() {
@@ -572,10 +521,24 @@ func (c *OpenAICompatible) Stream(ctx context.Context, req *core.ChatRequest, cr
 			}
 			chunks, perr := c.codec.ParseStreamLine([]byte(payload), req.Model)
 			if perr != nil {
-				// Skip a single malformed chunk rather than aborting the stream.
-				continue
+				sendStreamError(ctx, out, core.ErrResponseIntegrity, c.id, req.Model, perr)
+				return
 			}
 			for _, ch := range chunks {
+				if terminal {
+					switch ch.Type {
+					case core.ChunkUsage, core.ChunkFinish:
+					default:
+						sendStreamError(ctx, out, core.ErrResponseIntegrity, c.id, req.Model, errors.New("content after terminal finish"))
+						return
+					}
+				}
+				if ch.Type == core.ChunkFinish {
+					finish := ch
+					pendingFinish = &finish
+					terminal = true
+					continue
+				}
 				ttft.maybeReport(ch)
 				select {
 				case out <- ch:
@@ -585,9 +548,13 @@ func (c *OpenAICompatible) Stream(ctx context.Context, req *core.ChatRequest, cr
 			}
 		}
 		if err := scanner.Err(); err != nil {
-			out <- core.StreamChunk{
-				Type: core.ChunkError,
-				Err:  &core.ProviderError{Kind: core.ErrTimeout, Provider: c.id, Model: req.Model, Message: err.Error(), Cause: err},
+			sendStreamError(ctx, out, core.ErrTimeout, c.id, req.Model, err)
+			return
+		}
+		if pendingFinish != nil {
+			select {
+			case out <- *pendingFinish:
+			case <-ctx.Done():
 			}
 		}
 	}()

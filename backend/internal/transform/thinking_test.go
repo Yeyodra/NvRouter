@@ -121,6 +121,17 @@ func TestThinkTagStateStreaming(t *testing.T) {
 	}
 }
 
+func TestThinkTagStateFlushesBufferedTextBeforeTerminal(t *testing.T) {
+	ts := &ThinkTagState{}
+	if chunks := ts.ProcessFeed("answer<thi"); len(chunks) != 1 || chunks[0].Delta != "answer" {
+		t.Fatalf("ProcessFeed() = %+v, want safe text only", chunks)
+	}
+	chunks := ts.Flush()
+	if len(chunks) != 1 || chunks[0].Type != core.ChunkText || chunks[0].Delta != "<thi" {
+		t.Fatalf("Flush() = %+v, want buffered legitimate text", chunks)
+	}
+}
+
 func TestThinkTagStateNoTags(t *testing.T) {
 	ts := &ThinkTagState{}
 

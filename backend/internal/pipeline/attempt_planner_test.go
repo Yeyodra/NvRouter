@@ -172,16 +172,14 @@ func (c *repairPipelineConnector) Chat(_ context.Context, req *core.ChatRequest,
 	c.systems = append(c.systems, req.System)
 	c.accounts = append(c.accounts, creds.AccountID)
 	if len(c.systems) == 1 {
-		return nil, &core.ProviderError{
-			Kind:                   core.ErrUpstream,
-			Scope:                  core.FailureScopeRequest,
-			Message:                "incomplete response",
-			RetrySystemInstruction: "complete the previous response",
-			AttemptUsage: &core.Usage{
-				PromptTokens: 5, CompletionTokens: 1, TotalTokens: 6,
-				Source: core.UsageSourceProvider,
-			},
-		}
+		return &core.ChatResponse{
+			Model: req.Model,
+			Message: core.Message{Role: core.RoleAssistant, Content: []core.ContentPart{{
+				Type: core.PartToolCall, ToolCall: &core.ToolCall{ID: "call-1", Name: "Read", Arguments: []byte(`{"path":`)},
+			}}},
+			FinishReason: core.FinishToolCalls,
+			Usage:        core.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120, Source: core.UsageSourceProvider},
+		}, nil
 	}
 	return &core.ChatResponse{
 		Model: req.Model,
@@ -191,7 +189,7 @@ func (c *repairPipelineConnector) Chat(_ context.Context, req *core.ChatRequest,
 		},
 		FinishReason: core.FinishStop,
 		Usage: core.Usage{
-			PromptTokens: 6, CompletionTokens: 2, TotalTokens: 8,
+			PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12,
 			Source: core.UsageSourceProvider,
 		},
 	}, nil
@@ -220,9 +218,9 @@ func TestPipelineRepairReroutesAndAccountsForBothAttempts(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, "acc-2", result.AccountID)
-	require.Equal(t, 11, result.Response.Usage.PromptTokens)
-	require.Equal(t, 3, result.Response.Usage.CompletionTokens)
-	require.Equal(t, 14, result.Response.Usage.TotalTokens)
+	require.Equal(t, 110, result.Response.Usage.PromptTokens)
+	require.Equal(t, 22, result.Response.Usage.CompletionTokens)
+	require.Equal(t, 132, result.Response.Usage.TotalTokens)
 	require.Equal(t, "original", req.System)
 
 	conn.mu.Lock()

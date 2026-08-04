@@ -22,7 +22,7 @@ import (
 const (
 	mimoFreeDefaultBase   = "https://api.xiaomimimo.com"
 	mimoFreeBootstrapURL  = mimoFreeDefaultBase + "/api/free-ai/bootstrap"
-	mimoFreeChatBase     = mimoFreeDefaultBase + "/api/free-ai/openai"
+	mimoFreeChatBase      = mimoFreeDefaultBase + "/api/free-ai/openai"
 	mimoFreeSourceHeader  = "mimocode-cli-free"
 	mimoFreeRefreshBuf    = 5 * time.Minute
 	mimoFreeDefaultExpiry = 50 * time.Minute
@@ -360,7 +360,8 @@ func (c *MimoFree) Stream(ctx context.Context, req *core.ChatRequest, creds core
 			}
 			chunks, perr := c.codec.ParseStreamLine([]byte(payload), req.Model)
 			if perr != nil {
-				continue
+				sendStreamError(ctx, out, core.ErrUpstream, c.id, req.Model, perr)
+				return
 			}
 			for _, ch := range chunks {
 				ttft.maybeReport(ch)
@@ -372,10 +373,7 @@ func (c *MimoFree) Stream(ctx context.Context, req *core.ChatRequest, creds core
 			}
 		}
 		if err := scanner.Err(); err != nil {
-			out <- core.StreamChunk{
-				Type: core.ChunkError,
-				Err:  &core.ProviderError{Kind: core.ErrTimeout, Provider: c.id, Model: req.Model, Message: err.Error(), Cause: err},
-			}
+			sendStreamError(ctx, out, core.ErrTimeout, c.id, req.Model, err)
 		}
 	}()
 	return out, nil

@@ -42,6 +42,39 @@ func TestCommandCodeHeadersPreferAccessTokenAndAllowOverrides(t *testing.T) {
 	require.Equal(t, "custom-session", headers[commandCodeSessionHeader])
 }
 
+func TestCommandCodeChatReturnsFirstMalformedNDJSONError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte("{bad\n" + `{"type":"text-delta","text":"partial"}` + "\n"))
+	}))
+	defer srv.Close()
+
+	resp, err := NewCommandCode("commandcode", srv.URL).Chat(context.Background(), &core.ChatRequest{Model: "model"}, core.Credentials{APIKey: "test"})
+	require.Nil(t, resp)
+	require.Error(t, err)
+	require.Equal(t, core.ErrResponseIntegrity, core.AsProviderError(err).Kind)
+	require.Contains(t, err.Error(), "parse stream event")
+}
+
+func TestCommandCodeChatAcceptsContentAfterFinishStep(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"type":"text-delta","text":"before"}` + "\n" +
+			`{"type":"finish-step","finishReason":"tool-calls","usage":{"inputTokens":1}}` + "\n" +
+			`{"type":"text-delta","text":"after"}` + "\n" +
+			`{"type":"finish","finishReason":"stop","totalUsage":{"outputTokens":2,"totalTokens":3}}` + "\n"))
+	}))
+	defer srv.Close()
+
+	resp, err := NewCommandCode("commandcode", srv.URL).Chat(context.Background(), &core.ChatRequest{Model: "model"}, core.Credentials{APIKey: "test"})
+	require.NoError(t, err)
+	require.Equal(t, "beforeafter", resp.Message.TextContent())
+	require.Equal(t, core.FinishStop, resp.FinishReason)
+	require.Equal(t, 1, resp.Usage.PromptTokens)
+	require.Equal(t, 2, resp.Usage.CompletionTokens)
+	require.Equal(t, 3, resp.Usage.TotalTokens)
+}
+
 func TestCommandCodeChatForcesUpstreamStream(t *testing.T) {
 	var gotStream bool
 	var gotSession string

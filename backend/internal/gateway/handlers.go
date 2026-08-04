@@ -414,7 +414,7 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, codec transf
 	state := &transform.StreamState{Model: result.Model}
 	transform.ResetStreamState(state)
 	streamStart := time.Now()
-	var totalTokens int
+	var streamUsage core.Usage
 	var chunkCount int
 
 	// ToolArgSanitizer buffers streaming tool call arguments and emits
@@ -434,7 +434,62 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, codec transf
 	// Some models (MiMo, QwQ) embed reasoning as XML tags in the content
 	// field instead of using a structured reasoning_content field.
 	thinkFilter := &transform.ThinkTagState{}
+	var streamErr error
+	terminalStreamError := func(err error) {
+		if streamErr != nil {
+			return
+		}
+		if err == nil {
+			err = &core.ProviderError{Kind: core.ErrUpstream, Message: "provider stream failed"}
+		}
+		streamErr = err
+		if isClientDisconnect(err) {
+			return
+		}
+		s.consoleLog.Log("ERROR", "Provider stream error", fmt.Sprintf("%v", err))
+		s.log.Warn("stream error", "err", err)
+		if req.Metadata.SourceDialect == core.DialectOpenAIResponses {
+			events, _ := streamCodec.RenderStreamChunk(core.StreamChunk{Type: core.ChunkError, Err: errors.New(sanitizeUpstreamError(err))}, state)
+			for _, ev := range events {
+				_, _ = bw.Write(ev)
+			}
+		} else {
+			_, _ = bw.Write(streamErrorEvent(req.Metadata.SourceDialect, sanitizeUpstreamError(err)))
+		}
+		_ = bw.Flush()
+		flusher.Flush()
+	}
+	writeEvents := func(events [][]byte) bool {
+		for _, ev := range events {
+			if _, err := bw.Write(ev); err != nil {
+				streamErr = &streamWriteError{err: err}
+				s.consoleLog.Log("WARN", fmt.Sprintf("Client disconnected after %d chunks", chunkCount), "")
+				return false
+			}
+		}
+		if err := bw.Flush(); err != nil {
+			streamErr = &streamWriteError{err: err}
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+	render := func(cleaned core.StreamChunk) bool {
+		events, err := streamCodec.RenderStreamChunk(cleaned, state)
+		if err != nil {
+			terminalStreamError(err)
+			return false
+		}
+		return writeEvents(events)
+	}
 	renderChunk := func(cleaned core.StreamChunk) {
+		if streamErr != nil {
+			return
+		}
+		if cleaned.Type == core.ChunkError {
+			terminalStreamError(cleaned.Err)
+			return
+		}
 		// Route thinking chunks through the filter; tool calls and others
 		// pass through directly.
 		if cleaned.Type == core.ChunkText {
@@ -443,37 +498,13 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, codec transf
 					// Thinking content is consumed internally — not sent to client.
 					continue
 				}
-				events, rerr := streamCodec.RenderStreamChunk(fc, state)
-				if rerr != nil {
-					s.log.Warn("failed to render stream chunk", "err", rerr)
+				if !render(fc) {
 					return
 				}
-				for _, ev := range events {
-					if _, werr := bw.Write(ev); werr != nil {
-						s.consoleLog.Log("WARN", fmt.Sprintf("Client disconnected after %d chunks", chunkCount), "")
-						return
-					}
-				}
 			}
-			bw.Flush()
-			flusher.Flush()
 			return
 		}
-		events, rerr := streamCodec.RenderStreamChunk(cleaned, state)
-		if rerr != nil {
-			s.log.Warn("failed to render stream chunk", "err", rerr)
-			return
-		}
-		for _, ev := range events {
-			if _, werr := bw.Write(ev); werr != nil {
-				s.consoleLog.Log("WARN", fmt.Sprintf("Client disconnected after %d chunks", chunkCount), "")
-				return
-			}
-		}
-		// Flush the buffered writer to the underlying http.ResponseWriter,
-		// then flush the HTTP flusher to push bytes to the client.
-		bw.Flush()
-		flusher.Flush()
+		render(cleaned)
 	}
 
 	var heartbeatC <-chan time.Time
@@ -484,7 +515,6 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, codec transf
 	}
 	lastActivity := time.Now()
 
-	var streamErr error
 streamLoop:
 	for {
 		select {
@@ -494,29 +524,24 @@ streamLoop:
 			}
 			lastActivity = time.Now()
 			if chunk.Type == core.ChunkError {
-				streamErr = chunk.Err
-				if streamErr == nil {
-					streamErr = &core.ProviderError{Kind: core.ErrUpstream, Message: "provider stream failed"}
-				}
-				s.consoleLog.Log("ERROR", "Provider stream error", fmt.Sprintf("%v", streamErr))
-				s.log.Warn("stream error", "err", streamErr)
-				_, _ = bw.Write(streamErrorEvent(req.Metadata.SourceDialect, sanitizeUpstreamError(streamErr)))
-				// Emit terminal events so strict clients (Claude Code, Cline) see a
-				// well-formed stream end instead of a truncated connection. Without
-				// message_stop/[DONE], the client may treat the stream as incomplete
-				// and retry the request — causing duplicate responses on the user side.
-				for _, ev := range streamCodec.RenderStreamDone(state) {
-					_, _ = bw.Write(ev)
-				}
-				_ = bw.Flush()
-				flusher.Flush()
+				terminalStreamError(chunk.Err)
 				break streamLoop
 			}
 			if chunk.Type == core.ChunkUsage && chunk.Usage != nil {
-				totalTokens = chunk.Usage.PromptTokens + chunk.Usage.CompletionTokens
+				mergeStreamUsage(&streamUsage, *chunk.Usage)
 			}
 			chunkCount++
+			if chunk.Type == core.ChunkFinish {
+				for _, fc := range thinkFilter.Flush() {
+					if fc.Type != core.ChunkThinking && !render(fc) {
+						break
+					}
+				}
+			}
 			sanitizer.Process(chunk, renderChunk)
+			if streamErr != nil {
+				break streamLoop
+			}
 		case <-heartbeatC:
 			// Only beat when the stream has actually been silent; steady chunk
 			// traffic is its own keep-alive.
@@ -538,7 +563,7 @@ streamLoop:
 
 	latency := int(time.Since(streamStart).Milliseconds())
 	if streamErr != nil {
-		s.logRequest(keyName, result.Provider, result.Model, totalTokens, 0, latency, false, streamErr)
+		s.logRequest(keyName, result.Provider, result.Model, streamUsage.TotalTokens, 0, latency, false, streamErr)
 		return
 	}
 
@@ -547,29 +572,62 @@ streamLoop:
 	// upstream providers (e.g. some OpenAI-compatible gateways) will not
 	// cause re-emission of already-flushed content.
 	sanitizer.Flush(renderChunk)
+	if streamErr != nil {
+		s.logRequest(keyName, result.Provider, result.Model, streamUsage.TotalTokens, 0, latency, false, streamErr)
+		return
+	}
 
 	// Flush think-tag state — emit any remaining buffered text.
 	for _, fc := range thinkFilter.Flush() {
 		if fc.Type == core.ChunkThinking {
 			continue
 		}
-		events, _ := streamCodec.RenderStreamChunk(fc, state)
-		for _, ev := range events {
-			_, _ = bw.Write(ev)
+		if !render(fc) {
+			break
 		}
 	}
-
-	for _, ev := range streamCodec.RenderStreamDone(state) {
-		_, _ = bw.Write(ev)
+	if streamErr != nil {
+		s.logRequest(keyName, result.Provider, result.Model, streamUsage.TotalTokens, 0, latency, false, streamErr)
+		return
 	}
-	bw.Flush()
-	flusher.Flush()
+
+	writeEvents(streamCodec.RenderStreamDone(state))
+	if streamErr != nil {
+		s.logRequest(keyName, result.Provider, result.Model, streamUsage.TotalTokens, 0, latency, false, streamErr)
+		return
+	}
 
 	s.consoleLog.Log("DEBUG",
-		fmt.Sprintf("Stream complete · %d chunks · %s tokens · %s", chunkCount, humanInt(totalTokens), humanDuration(latency)),
+		fmt.Sprintf("Stream complete · %d chunks · %s tokens · %s", chunkCount, humanInt(streamUsage.TotalTokens), humanDuration(latency)),
 		fmt.Sprintf("Provider: %s\nModel:    %s\nChunks:   %d\nTokens:   %s\nLatency:  %dms",
-			result.Provider, result.Model, chunkCount, humanInt(totalTokens), latency))
-	s.logRequest(keyName, result.Provider, result.Model, totalTokens, 0, latency, false, nil)
+			result.Provider, result.Model, chunkCount, humanInt(streamUsage.TotalTokens), latency))
+	s.logRequest(keyName, result.Provider, result.Model, streamUsage.TotalTokens, 0, latency, false, nil)
+}
+
+func mergeStreamUsage(dst *core.Usage, src core.Usage) {
+	if src.PromptTokens != 0 {
+		dst.PromptTokens = src.PromptTokens
+	}
+	if src.CompletionTokens != 0 {
+		dst.CompletionTokens = src.CompletionTokens
+	}
+	if src.CachedTokens != 0 {
+		dst.CachedTokens = src.CachedTokens
+	}
+	if src.CacheWriteTokens != 0 {
+		dst.CacheWriteTokens = src.CacheWriteTokens
+	}
+	if src.ReasoningTokens != 0 {
+		dst.ReasoningTokens = src.ReasoningTokens
+	}
+	if src.Source != "" {
+		dst.Source = src.Source
+	}
+	if dst.PromptTokens != 0 || dst.CompletionTokens != 0 {
+		dst.TotalTokens = dst.PromptTokens + dst.CompletionTokens
+	} else if src.TotalTokens != 0 {
+		dst.TotalTokens = src.TotalTokens
+	}
 }
 
 // providerStreamEventError keeps a late provider error available to internal
@@ -593,8 +651,9 @@ func (e *streamWriteError) Unwrap() error { return e.err }
 // decoded; those are replaced with a dialect-compatible generic event.
 func copySanitizedStream(dst io.Writer, src io.Reader, dialect core.Dialect, flush func()) (int64, error) {
 	reader := bufio.NewReaderSize(src, 64*1024)
+	state := streamFrameState{dialect: dialect}
 	if dialect == core.DialectOllama {
-		return copySanitizedNDJSON(dst, reader, dialect, flush)
+		return copySanitizedNDJSON(dst, reader, dialect, flush, &state)
 	}
 
 	var event bytes.Buffer
@@ -604,7 +663,7 @@ func copySanitizedStream(dst io.Writer, src io.Reader, dialect core.Dialect, flu
 		if len(line) > 0 {
 			_, _ = event.Write(line)
 			if len(bytes.TrimRight(line, "\r\n")) == 0 {
-				n, err := writeSanitizedFrame(dst, event.Bytes(), dialect, flush)
+				n, err := writeSanitizedFrame(dst, event.Bytes(), dialect, flush, &state)
 				written += n
 				if err != nil {
 					return written, err
@@ -619,27 +678,43 @@ func copySanitizedStream(dst io.Writer, src io.Reader, dialect core.Dialect, flu
 			return written, &streamReadError{err: readErr}
 		}
 		if event.Len() > 0 {
-			n, err := writeSanitizedFrame(dst, event.Bytes(), dialect, flush)
-			written += n
-			if err != nil {
-				return written, err
+			integrityErr := responseIntegrityError("provider stream ended with a truncated frame")
+			if dialect == core.DialectOpenAIResponses {
+				n, err := writeResponsesFailure(dst, integrityErr.Error(), flush)
+				written += n
+				if err != nil {
+					return written, err
+				}
 			}
+			return written, integrityErr
 		}
-		return written, nil
+		if !state.terminal {
+			integrityErr := responseIntegrityError("provider stream ended without a terminal event")
+			if dialect == core.DialectOpenAIResponses {
+				n, err := writeResponsesFailure(dst, integrityErr.Error(), flush)
+				written += n
+				if err != nil {
+					return written, err
+				}
+			}
+			return written, integrityErr
+		}
+		n, err := state.flushTerminal(dst, flush)
+		return written + n, err
 	}
 }
 
 // copySanitizedNDJSON preserves Ollama's one-JSON-object-per-line framing.
 // ReadSlice avoids allocating for normal-sized lines; a buffer is used only
 // when an unusually large object spans the reader's bounded internal buffer.
-func copySanitizedNDJSON(dst io.Writer, reader *bufio.Reader, dialect core.Dialect, flush func()) (int64, error) {
+func copySanitizedNDJSON(dst io.Writer, reader *bufio.Reader, dialect core.Dialect, flush func(), state *streamFrameState) (int64, error) {
 	var oversized bytes.Buffer
 	var written int64
 	for {
 		fragment, readErr := reader.ReadSlice('\n')
 		if oversized.Len() == 0 && !errors.Is(readErr, bufio.ErrBufferFull) {
 			if len(bytes.TrimSpace(fragment)) > 0 {
-				n, err := writeSanitizedFrame(dst, fragment, dialect, flush)
+				n, err := writeSanitizedFrame(dst, fragment, dialect, flush, state)
 				written += n
 				if err != nil {
 					return written, err
@@ -649,7 +724,7 @@ func copySanitizedNDJSON(dst io.Writer, reader *bufio.Reader, dialect core.Diale
 			_, _ = oversized.Write(fragment)
 			if !errors.Is(readErr, bufio.ErrBufferFull) {
 				if len(bytes.TrimSpace(oversized.Bytes())) > 0 {
-					n, err := writeSanitizedFrame(dst, oversized.Bytes(), dialect, flush)
+					n, err := writeSanitizedFrame(dst, oversized.Bytes(), dialect, flush, state)
 					written += n
 					if err != nil {
 						return written, err
@@ -663,16 +738,85 @@ func copySanitizedNDJSON(dst io.Writer, reader *bufio.Reader, dialect core.Diale
 			continue
 		}
 		if readErr == io.EOF {
-			return written, nil
+			if !state.terminal {
+				return written, responseIntegrityError("provider stream ended without a terminal event")
+			}
+			n, err := state.flushTerminal(dst, flush)
+			return written + n, err
 		}
 		return written, &streamReadError{err: readErr}
 	}
 }
 
-func writeSanitizedFrame(dst io.Writer, raw []byte, dialect core.Dialect, flush func()) (int64, error) {
-	providerErr := hasStreamErrorMarker(raw) && isProviderStreamError(string(raw))
+type streamFrameState struct {
+	dialect  core.Dialect
+	terminal bool
+	pending  []byte
+}
+
+func (s *streamFrameState) flushTerminal(dst io.Writer, flush func()) (int64, error) {
+	if len(s.pending) == 0 {
+		return 0, nil
+	}
+	n, err := dst.Write(s.pending)
+	if err == nil && n != len(s.pending) {
+		err = io.ErrShortWrite
+	}
+	if flush != nil {
+		flush()
+	}
+	if err != nil {
+		return int64(n), &streamWriteError{err: err}
+	}
+	return int64(n), nil
+}
+
+func responseIntegrityError(message string) error {
+	return &core.ProviderError{Kind: core.ErrResponseIntegrity, Message: message, Cause: errors.New(message)}
+}
+
+func writeResponsesFailure(dst io.Writer, message string, flush func()) (int64, error) {
+	frame, _ := json.Marshal(map[string]any{
+		"type": "response.failed",
+		"response": map[string]any{
+			"object": "response", "status": "failed",
+			"error": map[string]string{"type": "upstream_error", "code": "upstream_error", "message": message},
+		},
+	})
+	out := append(append([]byte("event: response.failed\ndata: "), frame...), '\n', '\n')
+	n, err := dst.Write(out)
+	if flush != nil {
+		flush()
+	}
+	if err == nil && n != len(out) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		return int64(n), &streamWriteError{err: err}
+	}
+	return int64(n), nil
+}
+
+func writeSanitizedFrame(dst io.Writer, raw []byte, dialect core.Dialect, flush func(), state *streamFrameState) (int64, error) {
+	payload, done, err := validateStreamFrame(raw, dialect)
+	if err != nil {
+		return 0, err
+	}
+	if state.terminal && len(payload) > 0 && !done {
+		if !isUsageOnlyFrame(payload) {
+			return 0, responseIntegrityError("provider stream contained content after a terminal event")
+		}
+		state.pending = append(state.pending, raw...)
+		return 0, nil
+	}
+	providerErr := hasStreamErrorMarker(payload) && isProviderStreamError(string(raw))
+	if done && !providerErr {
+		state.terminal = true
+		state.pending = append(state.pending[:0], raw...)
+		return 0, nil
+	}
 	out := raw
-	if providerErr {
+	if providerErr && dialect != core.DialectOpenAIResponses {
 		out = streamErrorEvent(dialect, "upstream provider request failed")
 	}
 	n, err := dst.Write(out)
@@ -693,6 +837,78 @@ func writeSanitizedFrame(dst io.Writer, raw []byte, dialect core.Dialect, flush 
 		}
 	}
 	return int64(n), nil
+}
+
+func validateStreamFrame(raw []byte, dialect core.Dialect) ([]byte, bool, error) {
+	payload := bytes.TrimSpace(raw)
+	if dialect != core.DialectOllama {
+		var data strings.Builder
+		for _, line := range strings.Split(string(raw), "\n") {
+			line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+			if strings.HasPrefix(line, "data:") {
+				if data.Len() > 0 {
+					data.WriteByte('\n')
+				}
+				data.WriteString(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			}
+		}
+		if data.Len() == 0 {
+			return nil, false, nil // comments and event-only frames
+		}
+		payload = []byte(data.String())
+	}
+	if bytes.Equal(payload, []byte("[DONE]")) {
+		return payload, dialect == core.DialectOpenAI || dialect == core.DialectGemini, nil
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return nil, false, responseIntegrityError("provider stream contained malformed JSON")
+	}
+	typeName, _ := envelope["type"].(string)
+	terminal := false
+	switch dialect {
+	case core.DialectAnthropic:
+		terminal = typeName == "message_stop"
+	case core.DialectOpenAI:
+		if choices, ok := envelope["choices"].([]any); ok {
+			for _, choice := range choices {
+				if value, ok := choice.(map[string]any)["finish_reason"].(string); ok && value != "" {
+					terminal = true
+				}
+			}
+		}
+	case core.DialectOpenAIResponses:
+		terminal = typeName == "response.completed" || typeName == "response.failed" || typeName == "error"
+		if typeName == "response.incomplete" {
+			response, ok := envelope["response"].(map[string]any)
+			details, detailsOK := response["incomplete_details"].(map[string]any)
+			reason, reasonOK := details["reason"].(string)
+			if !ok || !detailsOK || !reasonOK || reason == "" {
+				return nil, false, responseIntegrityError("provider stream contained malformed response.incomplete")
+			}
+			terminal = true
+		}
+	case core.DialectOllama:
+		terminal, _ = envelope["done"].(bool)
+	case core.DialectGemini:
+		if candidates, ok := envelope["candidates"].([]any); ok {
+			for _, candidate := range candidates {
+				if value, ok := candidate.(map[string]any)["finishReason"].(string); ok && value != "" {
+					terminal = true
+				}
+			}
+		}
+	}
+	return payload, terminal, nil
+}
+
+func isUsageOnlyFrame(payload []byte) bool {
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(payload, &envelope) != nil || len(envelope["usage"]) == 0 || string(envelope["usage"]) == "null" {
+		return false
+	}
+	var choices []json.RawMessage
+	return json.Unmarshal(envelope["choices"], &choices) == nil && len(choices) == 0
 }
 
 func hasStreamErrorMarker(frame []byte) bool {

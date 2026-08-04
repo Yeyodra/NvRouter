@@ -287,7 +287,8 @@ func TestResponses_RenderStream_EventSequence(t *testing.T) {
 		Type: core.ChunkUsage, Usage: &core.Usage{PromptTokens: 1, CompletionTokens: 2, TotalTokens: 3},
 	}, state)
 	require.NoError(t, err)
-	require.Contains(t, strings.Join(toStrings(usage), ""), "response.completed")
+	require.Empty(t, usage)
+	require.Contains(t, strings.Join(toStrings(codec.RenderStreamDone(state)), ""), "response.completed")
 }
 
 func TestCrossDialect_OpenAIToResponsesRoundTrip(t *testing.T) {

@@ -16,6 +16,15 @@ import (
 // shape for a client that speaks Gemini.
 
 // gemStreamChunk is one SSE "data:" payload from streamGenerateContent.
+type GeminiStreamParser struct {
+	nextToolIndex int
+	hadTool       bool
+}
+
+func (GeminiCodec) NewStreamParser() *GeminiStreamParser {
+	return &GeminiStreamParser{}
+}
+
 type gemStreamChunk struct {
 	Candidates []struct {
 		Content      gemContent `json:"content"`
@@ -31,7 +40,11 @@ type gemStreamChunk struct {
 }
 
 // ParseStreamLine converts one Gemini SSE data payload into canonical chunks.
-func (GeminiCodec) ParseStreamLine(line []byte, _ string) ([]core.StreamChunk, error) {
+func (GeminiCodec) ParseStreamLine(line []byte, model string) ([]core.StreamChunk, error) {
+	return GeminiCodec{}.NewStreamParser().ParseStreamLine(line, model)
+}
+
+func (p *GeminiStreamParser) ParseStreamLine(line []byte, _ string) ([]core.StreamChunk, error) {
 	line = bytes.TrimSpace(line)
 	if len(line) == 0 {
 		return nil, nil
@@ -43,29 +56,29 @@ func (GeminiCodec) ParseStreamLine(line []byte, _ string) ([]core.StreamChunk, e
 	}
 
 	var chunks []core.StreamChunk
+	finishReason := ""
 	if len(raw.Candidates) > 0 {
 		cand := raw.Candidates[0]
-		for partIdx, p := range cand.Content.Parts {
+		finishReason = cand.FinishReason
+		for _, part := range cand.Content.Parts {
 			switch {
-			case p.FunctionCall != nil:
+			case part.FunctionCall != nil:
+				toolIdx := p.nextToolIndex
+				p.nextToolIndex++
+				p.hadTool = true
 				chunks = append(chunks, core.StreamChunk{
-					Type:  core.ChunkToolCall,
-					Index: partIdx,
+					Type:             core.ChunkToolCall,
+					Index:            toolIdx,
+					ToolArgumentMode: core.ToolArgumentComplete,
 					ToolCall: &core.ToolCall{
-						ID:        geminiCallID(p.FunctionCall.Name),
-						Name:      p.FunctionCall.Name,
-						Arguments: p.FunctionCall.Args,
+						ID:        fmt.Sprintf("%s_%d", geminiCallID(part.FunctionCall.Name), toolIdx),
+						Name:      part.FunctionCall.Name,
+						Arguments: part.FunctionCall.Args,
 					},
 				})
-			case p.Text != "":
-				chunks = append(chunks, core.StreamChunk{Type: core.ChunkText, Delta: p.Text})
+			case part.Text != "":
+				chunks = append(chunks, core.StreamChunk{Type: core.ChunkText, Delta: part.Text})
 			}
-		}
-		if cand.FinishReason != "" {
-			chunks = append(chunks, core.StreamChunk{
-				Type:         core.ChunkFinish,
-				FinishReason: mapGemFinish(cand.FinishReason),
-			})
 		}
 	}
 
@@ -85,6 +98,13 @@ func (GeminiCodec) ParseStreamLine(line []byte, _ string) ([]core.StreamChunk, e
 				Source:           core.UsageSourceProvider,
 			},
 		})
+	}
+	if finishReason != "" {
+		finish := mapGemFinish(finishReason)
+		if p.hadTool && finish == core.FinishStop {
+			finish = core.FinishToolCalls
+		}
+		chunks = append(chunks, core.StreamChunk{Type: core.ChunkFinish, FinishReason: finish})
 	}
 	return chunks, nil
 }
@@ -112,6 +132,9 @@ func (GeminiCodec) RenderStreamChunk(chunk core.StreamChunk, _ *StreamState) ([]
 		args := chunk.ToolCall.Arguments
 		if len(args) == 0 {
 			args = json.RawMessage("{}")
+		}
+		if !validCompleteToolArguments(args) {
+			return nil, fmt.Errorf("gemini: tool arguments must be a JSON object")
 		}
 		return [][]byte{gemEvent(map[string]any{
 			"candidates": []map[string]any{{

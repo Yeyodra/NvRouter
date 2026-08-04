@@ -114,6 +114,7 @@ func (c *Ollama) Stream(ctx context.Context, req *core.ChatRequest, creds core.C
 		defer resp.Body.Close()
 
 		ttft := newTTFTTracker(cfg)
+		parser := c.codec.NewStreamParser()
 
 		scanner := sseScanner(resp.Body) // reuse the generous-buffer line scanner
 		for scanner.Scan() {
@@ -125,9 +126,10 @@ func (c *Ollama) Stream(ctx context.Context, req *core.ChatRequest, creds core.C
 
 			// NDJSON: pass the raw line straight to the codec.
 			line := scanner.Bytes()
-			chunks, perr := c.codec.ParseStreamLine(line, req.Model)
+			chunks, perr := parser.ParseStreamLine(line, req.Model)
 			if perr != nil {
-				continue
+				sendStreamParseError(ctx, out, c.id, req.Model, perr)
+				return
 			}
 			for _, ch := range chunks {
 				ttft.maybeReport(ch)
@@ -139,10 +141,7 @@ func (c *Ollama) Stream(ctx context.Context, req *core.ChatRequest, creds core.C
 			}
 		}
 		if err := scanner.Err(); err != nil {
-			out <- core.StreamChunk{
-				Type: core.ChunkError,
-				Err:  &core.ProviderError{Kind: core.ErrTimeout, Provider: c.id, Model: req.Model, Message: err.Error(), Cause: err},
-			}
+			sendStreamError(ctx, out, core.ErrTimeout, c.id, req.Model, err)
 		}
 	}()
 	return out, nil

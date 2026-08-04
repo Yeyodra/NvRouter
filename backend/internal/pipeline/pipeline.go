@@ -35,6 +35,7 @@ import (
 	"github.com/mydisha/keirouter/backend/internal/ponytail"
 	"github.com/mydisha/keirouter/backend/internal/slimmer"
 	"github.com/mydisha/keirouter/backend/internal/terse"
+	"github.com/mydisha/keirouter/backend/internal/transform"
 )
 
 // TimeoutReader provides dynamic timeout values that can be updated at runtime.
@@ -332,6 +333,16 @@ func (p *Pipeline) Chat(ctx context.Context, req *core.ChatRequest, opts Options
 		// duration, including terminal stream-open and drain failures.
 		latency = time.Since(started)
 		lastLatency = latency
+		if callErr == nil {
+			callErr = transform.ValidateResponseIntegrity(resp)
+			if callErr != nil && resp != nil {
+				pe := core.AsProviderError(callErr)
+				copy := *pe
+				copy.RetrySystemInstruction = "complete the previous response"
+				copy.AttemptUsage = &resp.Usage
+				callErr = &copy
+			}
+		}
 
 		if callErr != nil {
 			pe := providerErrorForAttempt(callErr, attempt)
@@ -872,6 +883,8 @@ func (p *Pipeline) pumpStream(ctx context.Context, req *core.ChatRequest, in <-c
 	var usage core.Usage
 	var sawUsage bool
 	var completionChars int
+	var pendingFinish *core.StreamChunk
+	validator := transform.NewToolArgSanitizer()
 
 	settleClientCancellation := func() {
 		cancelUpstream()
@@ -922,6 +935,31 @@ func (p *Pipeline) pumpStream(ctx context.Context, req *core.ChatRequest, in <-c
 					return
 				}
 				stopStall()
+				var integrityErr error
+				validator.Flush(func(validated core.StreamChunk) {
+					if validated.Type == core.ChunkError {
+						integrityErr = validated.Err
+					}
+				})
+				if integrityErr != nil {
+					pe := p.recordTerminalStreamFailure(ctx, req, meta, attempt, integrityErr,
+						attemptStarted, requestStarted, usage, completionChars, *ttft, save, fellBack, scope)
+					select {
+					case out <- core.StreamChunk{Type: core.ChunkError, Err: pe}:
+					case <-ctx.Done():
+					}
+					return
+				}
+				if pendingFinish == nil {
+					pe := p.recordTerminalStreamFailure(ctx, req, meta, attempt,
+						&core.ProviderError{Kind: core.ErrResponseIntegrity, Message: "provider stream ended without a terminal finish"},
+						attemptStarted, requestStarted, usage, completionChars, *ttft, save, fellBack, scope)
+					select {
+					case out <- core.StreamChunk{Type: core.ChunkError, Err: pe}:
+					case <-ctx.Done():
+					}
+					return
+				}
 				// Always synthesize an auditable estimate when the provider omits
 				// usage. Only emit it to the client when include_usage was requested.
 				if !sawUsage {
@@ -935,6 +973,12 @@ func (p *Pipeline) pumpStream(ctx context.Context, req *core.ChatRequest, in <-c
 							return
 						}
 					}
+				}
+				select {
+				case out <- *pendingFinish:
+				case <-ctx.Done():
+					settleClientCancellation()
+					return
 				}
 				upstreamLatency := time.Since(attemptStarted)
 				p.dispatcher.NoteSuccess(context.WithoutCancel(ctx), attempt.Target.Provider, attempt.Account.ID, attempt.Target.Model)
@@ -958,6 +1002,36 @@ func (p *Pipeline) pumpStream(ctx context.Context, req *core.ChatRequest, in <-c
 				chunk.Err = pe
 				select {
 				case out <- chunk:
+				case <-ctx.Done():
+				}
+				return
+			}
+			if chunk.Type == core.ChunkFinish {
+				finish := chunk
+				pendingFinish = &finish
+				continue
+			}
+			if pendingFinish != nil && chunk.Type != core.ChunkUsage {
+				pe := p.recordTerminalStreamFailure(ctx, req, meta, attempt,
+					&core.ProviderError{Kind: core.ErrResponseIntegrity, Message: "provider stream contained content after a terminal finish"},
+					attemptStarted, requestStarted, usage, completionChars, *ttft, save, fellBack, scope)
+				select {
+				case out <- core.StreamChunk{Type: core.ChunkError, Err: pe}:
+				case <-ctx.Done():
+				}
+				return
+			}
+			var integrityErr error
+			validator.Process(chunk, func(validated core.StreamChunk) {
+				if validated.Type == core.ChunkError {
+					integrityErr = validated.Err
+				}
+			})
+			if integrityErr != nil {
+				pe := p.recordTerminalStreamFailure(ctx, req, meta, attempt, integrityErr,
+					attemptStarted, requestStarted, usage, completionChars, *ttft, save, fellBack, scope)
+				select {
+				case out <- core.StreamChunk{Type: core.ChunkError, Err: pe}:
 				case <-ctx.Done():
 				}
 				return
@@ -1427,6 +1501,8 @@ func (p *Pipeline) recordTerminalStreamFailure(ctx context.Context, req *core.Ch
 	}
 	upstreamLatency := time.Since(attemptStarted)
 	usage = partialStreamUsage(req, usage, completionChars)
+	attemptUsage := usage
+	pe.AttemptUsage = &attemptUsage
 	pe, cost := p.recordAttemptTerminal(ctx, meta, attempt, pe, usage, upstreamLatency,
 		time.Since(requestStarted), ttft, save, fellBack)
 	p.budgetConfirm(scope, cost)
@@ -1700,27 +1776,101 @@ func (p *Pipeline) cacheStore(ctx context.Context, vec []float32, resp *core.Cha
 	}
 }
 
-// cloneForAttempt produces a shallow copy of the request with the candidate's
-// model id, so each fallback attempt targets the right model without mutating
-// the shared request.
+// cloneForAttempt isolates every mutable request field so capability stripping
+// and connector normalization cannot leak into later fallback attempts.
 func cloneForAttempt(req *core.ChatRequest, model string) *core.ChatRequest {
 	clone := *req
 	clone.Model = model
+	clone.Messages = append([]core.Message(nil), req.Messages...)
+	for i := range clone.Messages {
+		clone.Messages[i].Content = append([]core.ContentPart(nil), req.Messages[i].Content...)
+		for j := range clone.Messages[i].Content {
+			part := &clone.Messages[i].Content[j]
+			if part.Media != nil {
+				media := *part.Media
+				part.Media = &media
+			}
+			if part.ToolCall != nil {
+				toolCall := *part.ToolCall
+				toolCall.Arguments = append(json.RawMessage(nil), part.ToolCall.Arguments...)
+				part.ToolCall = &toolCall
+			}
+			if part.ToolResult != nil {
+				toolResult := *part.ToolResult
+				part.ToolResult = &toolResult
+			}
+		}
+	}
+	clone.Tools = append([]core.Tool(nil), req.Tools...)
+	for i := range clone.Tools {
+		clone.Tools[i].Parameters = append(json.RawMessage(nil), req.Tools[i].Parameters...)
+		clone.Tools[i].Format = append(json.RawMessage(nil), req.Tools[i].Format...)
+	}
+	clone.ToolChoice = cloneJSONValue(req.ToolChoice)
+	clone.Stop = append([]string(nil), req.Stop...)
+	clone.Temperature = clonePtr(req.Temperature)
+	clone.TopP = clonePtr(req.TopP)
+	clone.MaxTokens = clonePtr(req.MaxTokens)
+	clone.Reasoning = clonePtr(req.Reasoning)
+	clone.ResponseFormat = append(json.RawMessage(nil), req.ResponseFormat...)
+	if req.Metadata.RequiredCapabilities != nil {
+		clone.Metadata.RequiredCapabilities = make(core.CapabilitySet, len(req.Metadata.RequiredCapabilities))
+		for capability := range req.Metadata.RequiredCapabilities {
+			clone.Metadata.RequiredCapabilities[capability] = struct{}{}
+		}
+	}
+	if req.Extra != nil {
+		clone.Extra = make(map[string]json.RawMessage, len(req.Extra))
+		for key, value := range req.Extra {
+			clone.Extra[key] = append(json.RawMessage(nil), value...)
+		}
+	}
 	return &clone
 }
 
+func clonePtr[T any](value *T) *T {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	return &clone
+}
+
+func cloneJSONValue(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		clone := make(map[string]any, len(value))
+		for key, child := range value {
+			clone[key] = cloneJSONValue(child)
+		}
+		return clone
+	case []any:
+		clone := make([]any, len(value))
+		for i, child := range value {
+			clone[i] = cloneJSONValue(child)
+		}
+		return clone
+	case json.RawMessage:
+		return append(json.RawMessage(nil), value...)
+	case []byte:
+		return append([]byte(nil), value...)
+	default:
+		return value
+	}
+}
+
 func cloneWithSystemInstruction(req *core.ChatRequest, instruction string) *core.ChatRequest {
-	clone := *req
+	clone := cloneForAttempt(req, req.Model)
 	instruction = strings.TrimSpace(instruction)
 	if instruction == "" {
-		return &clone
+		return clone
 	}
 	if strings.TrimSpace(clone.System) == "" {
 		clone.System = instruction
 	} else {
 		clone.System += "\n\n" + instruction
 	}
-	return &clone
+	return clone
 }
 
 // isStreamRequiredError reports whether the error indicates the upstream
@@ -1752,61 +1902,7 @@ func isStreamRequiredError(err error) bool {
 // with a "Stream must be set to true" error and the pipeline retries with
 // streaming internally.
 func drainStream(stream <-chan core.StreamChunk, model string) (*core.ChatResponse, error) {
-	msg := core.Message{Role: core.RoleAssistant}
-	var text, thinking string
-	toolCalls := map[string]*core.ToolCall{}
-	var toolOrder []string
-	finish := core.FinishStop
-	var usage core.Usage
-
-	for ch := range stream {
-		switch ch.Type {
-		case core.ChunkText:
-			text += ch.Delta
-		case core.ChunkThinking:
-			thinking += ch.Delta
-		case core.ChunkToolCall:
-			if ch.ToolCall != nil {
-				existing, ok := toolCalls[ch.ToolCall.ID]
-				if !ok {
-					tc := *ch.ToolCall
-					toolCalls[ch.ToolCall.ID] = &tc
-					toolOrder = append(toolOrder, ch.ToolCall.ID)
-				} else if len(ch.ToolCall.Arguments) > 0 {
-					existing.Arguments = append(existing.Arguments, ch.ToolCall.Arguments...)
-				}
-				finish = core.FinishToolCalls
-			}
-		case core.ChunkFinish:
-			if ch.FinishReason != "" {
-				finish = ch.FinishReason
-			}
-		case core.ChunkUsage:
-			if ch.Usage != nil {
-				usage = *ch.Usage
-			}
-		case core.ChunkError:
-			if ch.Err != nil {
-				return nil, ch.Err
-			}
-		}
-	}
-
-	if thinking != "" {
-		msg.Content = append(msg.Content, core.ContentPart{Type: core.PartThinking, Text: thinking})
-	}
-	if text != "" {
-		msg.Content = append(msg.Content, core.ContentPart{Type: core.PartText, Text: text})
-	}
-	for _, id := range toolOrder {
-		tc := toolCalls[id]
-		if len(tc.Arguments) == 0 {
-			tc.Arguments = json.RawMessage("{}")
-		}
-		msg.Content = append(msg.Content, core.ContentPart{Type: core.PartToolCall, ToolCall: tc})
-	}
-
-	return &core.ChatResponse{Model: model, Message: msg, FinishReason: finish, Usage: usage}, nil
+	return transform.CollectStreamResponse(stream, model)
 }
 
 // ---- direct-body usage capture -----------------------------------------------

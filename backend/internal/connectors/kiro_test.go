@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -112,6 +113,30 @@ func TestEventStreamParserRejectsTruncatedFrame(t *testing.T) {
 
 	_, err := parser.next()
 	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+}
+
+type failingReader struct{ err error }
+
+func (r failingReader) Read([]byte) (int, error) { return 0, r.err }
+
+func TestKiroParserErrorClassification(t *testing.T) {
+	request := &core.ChatRequest{Model: "model"}
+	for _, tt := range []struct {
+		name string
+		body io.ReadCloser
+		kind core.ErrorKind
+	}{
+		{"truncated", io.NopCloser(bytes.NewReader(encodeEventStreamFrame("messageStopEvent", []byte(`{}`))[:8])), core.ErrResponseIntegrity},
+		{"invalid length", io.NopCloser(bytes.NewReader(make([]byte, 12))), core.ErrResponseIntegrity},
+		{"transport", io.NopCloser(failingReader{errors.New("connection reset")}), core.ErrUpstream},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			stream := NewKiro("kiro", "").pipeKiroResponse(context.Background(), &http.Response{Body: tt.body}, request, nil)
+			chunk := <-stream
+			require.Equal(t, core.ChunkError, chunk.Type)
+			require.Equal(t, tt.kind, core.AsProviderError(chunk.Err).Kind)
+		})
+	}
 }
 
 func TestKiroFrameToChunks_TextAndStop(t *testing.T) {
@@ -535,6 +560,7 @@ func TestKiroFrameToChunksMalformedToolRequestsRepair(t *testing.T) {
 	require.Len(t, chunks, 1)
 	require.Equal(t, core.ChunkError, chunks[0].Type)
 	pe := core.AsProviderError(chunks[0].Err)
+	require.Equal(t, core.ErrResponseIntegrity, pe.Kind)
 	require.Equal(t, core.FailureScopeRequest, pe.Scope)
 	require.NotEmpty(t, pe.RetrySystemInstruction)
 	require.False(t, hasTool)
@@ -574,6 +600,32 @@ func TestKiroToolUseChunksValidatesArgumentsAtomically(t *testing.T) {
 	})
 }
 
+func TestKiroStreamAlignedEOFMissingStopPreservesUsageInIntegrityError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(encodeEventStreamFrame("usageEvent", []byte(`{"inputTokens":3,"outputTokens":1}`)))
+	}))
+	defer srv.Close()
+
+	stream, err := NewKiro("kiro", srv.URL).Stream(context.Background(), &core.ChatRequest{
+		Model: "model", Messages: []core.Message{{Role: core.RoleUser, Content: []core.ContentPart{{Type: core.PartText, Text: "hello"}}}},
+	}, core.Credentials{BaseURL: srv.URL}, core.StreamConfig{})
+	require.NoError(t, err)
+
+	var chunks []core.StreamChunk
+	for chunk := range stream {
+		chunks = append(chunks, chunk)
+	}
+	require.Len(t, chunks, 2)
+	require.Equal(t, core.ChunkUsage, chunks[0].Type)
+	require.Equal(t, 4, chunks[0].Usage.TotalTokens)
+	require.Equal(t, core.ChunkError, chunks[1].Type)
+	pe := core.AsProviderError(chunks[1].Err)
+	require.Equal(t, core.ErrResponseIntegrity, pe.Kind)
+	require.NotNil(t, pe.AttemptUsage)
+	require.Equal(t, 4, pe.AttemptUsage.TotalTokens)
+}
+
 func TestKiroStreamForwardsBeforeUpstreamEOF(t *testing.T) {
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -607,6 +659,41 @@ func TestKiroStreamForwardsBeforeUpstreamEOF(t *testing.T) {
 	}
 }
 
+func TestKiroChatCollectionErrorPreservesSeenUsage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(encodeEventStreamFrame("usageEvent", []byte(`{"inputTokens":3,"outputTokens":1}`)))
+		_, _ = w.Write(encodeEventStreamFrame("toolUseEvent", []byte(`{"toolUseId":"t1","input":{}}`)))
+	}))
+	defer srv.Close()
+
+	_, err := NewKiro("kiro", srv.URL).Chat(context.Background(), &core.ChatRequest{
+		Model: "model", Messages: []core.Message{{Role: core.RoleUser, Content: []core.ContentPart{{Type: core.PartText, Text: "hello"}}}},
+	}, core.Credentials{BaseURL: srv.URL})
+	pe := core.AsProviderError(err)
+	require.Equal(t, core.ErrResponseIntegrity, pe.Kind)
+	require.NotNil(t, pe.AttemptUsage)
+	require.Equal(t, 4, pe.AttemptUsage.TotalTokens)
+}
+
+func TestKiroChatRepeatedCompleteToolUpdatesReplaceArguments(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(encodeEventStreamFrame("toolUseEvent", []byte(`{"toolUseId":"t1","name":"lookup","input":{"city":"SF"}}`)))
+		_, _ = w.Write(encodeEventStreamFrame("toolUseEvent", []byte(`{"toolUseId":"t1","name":"lookup","input":{"city":"Paris"}}`)))
+		_, _ = w.Write(encodeEventStreamFrame("messageStopEvent", []byte(`{}`)))
+	}))
+	defer srv.Close()
+
+	resp, err := NewKiro("kiro", srv.URL).Chat(context.Background(), &core.ChatRequest{
+		Model:    "model",
+		Messages: []core.Message{{Role: core.RoleUser, Content: []core.ContentPart{{Type: core.PartText, Text: "hello"}}}},
+	}, core.Credentials{BaseURL: srv.URL})
+	require.NoError(t, err)
+	require.Len(t, resp.Message.Content, 1)
+	require.JSONEq(t, `{"city":"Paris"}`, string(resp.Message.Content[0].ToolCall.Arguments))
+}
+
 func TestKiroChatIncompleteResponseReturnsRoutedRepair(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -631,7 +718,7 @@ func TestKiroChatIncompleteResponseReturnsRoutedRepair(t *testing.T) {
 	}
 
 	pe := core.AsProviderError(err)
-	require.Equal(t, core.ErrUpstream, pe.Kind)
+	require.Equal(t, core.ErrResponseIntegrity, pe.Kind)
 	require.Equal(t, core.FailureScopeRequest, pe.Scope)
 	require.NotEmpty(t, pe.RetrySystemInstruction)
 	require.NotNil(t, pe.AttemptUsage)

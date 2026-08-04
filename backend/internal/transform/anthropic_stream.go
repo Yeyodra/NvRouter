@@ -40,6 +40,10 @@ type antStreamEvent struct {
 		CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 	} `json:"usage"`
+	Error *struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error"`
 	Message *struct {
 		Usage struct {
 			InputTokens              int `json:"input_tokens"`
@@ -63,15 +67,26 @@ func (AnthropicCodec) ParseStreamLine(line []byte, _ string) ([]core.StreamChunk
 	}
 
 	switch ev.Type {
+	case "error":
+		if ev.Error == nil {
+			return nil, fmt.Errorf("anthropic: upstream error")
+		}
+		return nil, &core.ProviderError{
+			Kind:    anthropicErrorKind(ev.Error.Type),
+			Scope:   anthropicErrorScope(ev.Error.Type),
+			Message: ev.Error.Message,
+		}
+
 	case "content_block_start":
 		if ev.ContentBlock.Type == "tool_use" {
 			return []core.StreamChunk{{
-				Type:  core.ChunkToolCall,
-				Index: ev.Index,
+				Type:             core.ChunkToolCall,
+				Index:            ev.Index,
+				ToolArgumentMode: core.ToolArgumentDelta,
 				ToolCall: &core.ToolCall{
 					ID:        ev.ContentBlock.ID,
 					Name:      ev.ContentBlock.Name,
-					Arguments: json.RawMessage("{}"),
+					Arguments: nil,
 				},
 			}}, nil
 		}
@@ -85,21 +100,16 @@ func (AnthropicCodec) ParseStreamLine(line []byte, _ string) ([]core.StreamChunk
 			return []core.StreamChunk{{Type: core.ChunkThinking, Delta: ev.Delta.Thinking}}, nil
 		case "input_json_delta":
 			return []core.StreamChunk{{
-				Type:     core.ChunkToolCall,
-				Index:    ev.Index,
-				ToolCall: &core.ToolCall{Arguments: json.RawMessage(ev.Delta.PartialJSON)},
+				Type:             core.ChunkToolCall,
+				Index:            ev.Index,
+				ToolArgumentMode: core.ToolArgumentDelta,
+				ToolCall:         &core.ToolCall{Arguments: json.RawMessage(ev.Delta.PartialJSON)},
 			}}, nil
 		}
 		return nil, nil
 
 	case "message_delta":
 		var chunks []core.StreamChunk
-		if ev.Delta.StopReason != "" {
-			chunks = append(chunks, core.StreamChunk{
-				Type:         core.ChunkFinish,
-				FinishReason: mapAntStop(ev.Delta.StopReason),
-			})
-		}
 		if ev.Usage != nil {
 			promptTokens := ev.Usage.InputTokens + ev.Usage.CacheReadInputTokens + ev.Usage.CacheCreationInputTokens
 			chunks = append(chunks, core.StreamChunk{
@@ -112,6 +122,12 @@ func (AnthropicCodec) ParseStreamLine(line []byte, _ string) ([]core.StreamChunk
 					CacheWriteTokens: ev.Usage.CacheCreationInputTokens,
 					Source:           core.UsageSourceProvider,
 				},
+			})
+		}
+		if ev.Delta.StopReason != "" {
+			chunks = append(chunks, core.StreamChunk{
+				Type:         core.ChunkFinish,
+				FinishReason: mapAntStop(ev.Delta.StopReason),
 			})
 		}
 		return chunks, nil
@@ -139,6 +155,30 @@ func (AnthropicCodec) ParseStreamLine(line []byte, _ string) ([]core.StreamChunk
 	}
 }
 
+func anthropicErrorKind(errorType string) core.ErrorKind {
+	switch errorType {
+	case "invalid_request_error", "request_too_large":
+		return core.ErrBadRequest
+	case "authentication_error", "permission_error":
+		return core.ErrAuth
+	case "rate_limit_error":
+		return core.ErrRateLimit
+	default:
+		return core.ErrUpstream
+	}
+}
+
+func anthropicErrorScope(errorType string) core.FailureScope {
+	switch anthropicErrorKind(errorType) {
+	case core.ErrBadRequest:
+		return core.FailureScopeRequest
+	case core.ErrAuth, core.ErrRateLimit:
+		return core.FailureScopeAccount
+	default:
+		return core.FailureScopeProvider
+	}
+}
+
 // RenderStreamChunk emits Anthropic event(s) for a canonical chunk. It lazily
 // opens the message and a text content block on first text delta.
 func (AnthropicCodec) RenderStreamChunk(chunk core.StreamChunk, state *StreamState) ([][]byte, error) {
@@ -152,12 +192,19 @@ func (AnthropicCodec) RenderStreamChunk(chunk core.StreamChunk, state *StreamSta
 			return
 		}
 		state.SentRole = true
+		usage := map[string]int{"input_tokens": 0, "output_tokens": 0}
+		if u, ok := state.Custom["usage"].(core.Usage); ok {
+			usage["input_tokens"] = anthropicInputTokens(u)
+			usage["output_tokens"] = u.CompletionTokens
+			usage["cache_read_input_tokens"] = u.CachedTokens
+			usage["cache_creation_input_tokens"] = u.CacheWriteTokens
+		}
 		events = append(events, antEvent("message_start", map[string]any{
 			"type": "message_start",
 			"message": map[string]any{
 				"id": firstNonEmpty(state.MessageID, "msg_stream"), "type": "message",
 				"role": "assistant", "model": state.Model, "content": []any{},
-				"stop_reason": nil, "usage": map[string]int{"input_tokens": 0, "output_tokens": 0},
+				"stop_reason": nil, "usage": usage,
 			},
 		}))
 	}
@@ -236,6 +283,11 @@ func (AnthropicCodec) RenderStreamChunk(chunk core.StreamChunk, state *StreamSta
 		}))
 
 	case core.ChunkToolCall:
+		if chunk.ToolCall != nil && len(chunk.ToolCall.Arguments) > 0 &&
+			chunk.ToolArgumentMode != core.ToolArgumentDelta &&
+			!validCompleteToolArguments(chunk.ToolCall.Arguments) {
+			return nil, fmt.Errorf("anthropic: tool arguments must be a JSON object")
+		}
 		ensureOpen()
 		if chunk.ToolCall == nil {
 			break
@@ -303,11 +355,20 @@ func (AnthropicCodec) RenderStreamChunk(chunk core.StreamChunk, state *StreamSta
 			}
 		}
 
-	case core.ChunkFinish:
-		if sent, _ := state.Custom["finish_sent"].(bool); sent {
+	case core.ChunkUsage:
+		if chunk.Usage == nil {
 			return nil, nil
 		}
-		state.Custom["finish_sent"] = true
+		state.Custom["usage"] = *chunk.Usage
+		if !state.SentRole {
+			ensureOpen()
+		}
+
+	case core.ChunkFinish:
+		if _, pending := state.Custom["finish_reason"]; pending {
+			return nil, nil
+		}
+		state.Custom["finish_reason"] = chunk.FinishReason
 		ensureOpen()
 		// Close any open thinking block, then any open tool block, then any
 		// open text block — each with its own index — so every content_block_stop
@@ -332,11 +393,6 @@ func (AnthropicCodec) RenderStreamChunk(chunk core.StreamChunk, state *StreamSta
 			}))
 			state.OpenedBlock = false
 		}
-		events = append(events, antEvent("message_delta", map[string]any{
-			"type":  "message_delta",
-			"delta": map[string]any{"stop_reason": renderAntStop(chunk.FinishReason)},
-			"usage": map[string]int{"output_tokens": 0},
-		}))
 
 	default:
 		return nil, nil
@@ -362,9 +418,24 @@ func nextContentIndex(state *StreamState) int {
 	return max + 1
 }
 
-// RenderStreamDone emits the terminal message_stop event.
-func (AnthropicCodec) RenderStreamDone(_ *StreamState) [][]byte {
-	return [][]byte{antEvent("message_stop", map[string]any{"type": "message_stop"})}
+// RenderStreamDone emits the buffered terminal delta followed by message_stop.
+func (AnthropicCodec) RenderStreamDone(state *StreamState) [][]byte {
+	finish, ok := state.Custom["finish_reason"].(core.FinishReason)
+	if !ok {
+		finish = core.FinishStop
+	}
+	outputTokens := 0
+	if usage, ok := state.Custom["usage"].(core.Usage); ok {
+		outputTokens = usage.CompletionTokens
+	}
+	return [][]byte{
+		antEvent("message_delta", map[string]any{
+			"type":  "message_delta",
+			"delta": map[string]any{"stop_reason": renderAntStop(finish)},
+			"usage": map[string]int{"output_tokens": outputTokens},
+		}),
+		antEvent("message_stop", map[string]any{"type": "message_stop"}),
+	}
 }
 
 // antEvent formats a named Anthropic SSE event: "event: <name>\ndata: <json>\n\n".

@@ -131,6 +131,36 @@ func TestOllama_RenderStream_NDJSONShape(t *testing.T) {
 	require.Contains(t, string(done[0]), `"prompt_eval_count":4`)
 }
 
+func TestOllama_ExplicitZeroIndexAndRenderIdentity(t *testing.T) {
+	parser := (OllamaCodec{}).NewStreamParser()
+	first, err := parser.ParseStreamLine([]byte(`{"message":{"tool_calls":[{"id":"call_4","function":{"index":4,"name":"a","arguments":{}}}]}}`), "model")
+	require.NoError(t, err)
+	second, err := parser.ParseStreamLine([]byte(`{"message":{"tool_calls":[{"id":"call_0","function":{"index":0,"name":"b","arguments":{}}}]}}`), "model")
+	require.NoError(t, err)
+	require.Equal(t, 4, first[0].Index)
+	require.Equal(t, 0, second[0].Index)
+
+	events, err := (OllamaCodec{}).RenderStreamChunk(core.StreamChunk{Type: core.ChunkToolCall, Index: 7, ToolCall: &core.ToolCall{ID: "call_7", Name: "lookup", Arguments: []byte(`{}`)}}, &StreamState{Model: "model"})
+	require.NoError(t, err)
+	require.Contains(t, string(events[0]), `"id":"call_7"`)
+	require.Contains(t, string(events[0]), `"index":7`)
+}
+
+func TestOllama_LengthFinishUnaryStreamParity(t *testing.T) {
+	codec := OllamaCodec{}
+	resp, err := codec.ParseResponse([]byte(`{"done":true,"done_reason":"length"}`), "model")
+	require.NoError(t, err)
+	require.Equal(t, core.FinishLength, resp.FinishReason)
+
+	chunks, err := codec.NewStreamParser().ParseStreamLine([]byte(`{"done":true,"done_reason":"length"}`), "model")
+	require.NoError(t, err)
+	require.Equal(t, core.FinishLength, chunks[0].FinishReason)
+
+	rendered, err := codec.RenderResponse(&core.ChatResponse{Model: "model", FinishReason: core.FinishLength})
+	require.NoError(t, err)
+	require.Contains(t, string(rendered), `"done_reason":"length"`)
+}
+
 func TestCrossDialect_OpenAIToOllamaRoundTrip(t *testing.T) {
 	body := []byte(`{
 		"model": "llama3.1",

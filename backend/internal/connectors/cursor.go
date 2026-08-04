@@ -141,7 +141,7 @@ func (c *Cursor) Stream(ctx context.Context, req *core.ChatRequest, creds core.C
 
 		ttft := newTTFTTracker(cfg)
 
-		seen := map[string]bool{}
+		indices := map[string]int{}
 		hadTool := false
 
 		emit := func(ch core.StreamChunk) bool {
@@ -159,15 +159,17 @@ func (c *Cursor) Stream(ctx context.Context, req *core.ChatRequest, creds core.C
 			case r.toolCall != nil:
 				hadTool = true
 				tc := r.toolCall
-				if !seen[tc.id] {
-					seen[tc.id] = true
-					ch := core.StreamChunk{Type: core.ChunkToolCall, ToolCall: &core.ToolCall{ID: tc.id, Name: tc.name, Arguments: json.RawMessage("")}}
+				index, seen := indices[tc.id]
+				if !seen {
+					index = len(indices)
+					indices[tc.id] = index
+					ch := core.StreamChunk{Type: core.ChunkToolCall, Index: index, ToolArgumentMode: core.ToolArgumentDelta, ToolCall: &core.ToolCall{ID: tc.id, Name: tc.name, Arguments: json.RawMessage("")}}
 					if !emit(ch) {
 						return
 					}
 				}
 				if tc.args != "" && tc.args != "{}" {
-					ch := core.StreamChunk{Type: core.ChunkToolCall, ToolCall: &core.ToolCall{ID: tc.id, Arguments: json.RawMessage(tc.args)}}
+					ch := core.StreamChunk{Type: core.ChunkToolCall, Index: index, ToolArgumentMode: core.ToolArgumentDelta, ToolCall: &core.ToolCall{ID: tc.id, Arguments: json.RawMessage(tc.args)}}
 					if !emit(ch) {
 						return
 					}

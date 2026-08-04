@@ -133,6 +133,7 @@ func (c *Gemini) Stream(ctx context.Context, req *core.ChatRequest, creds core.C
 		defer resp.Body.Close()
 
 		ttft := newTTFTTracker(cfg)
+		parser := c.codec.NewStreamParser()
 
 		scanner := sseScanner(resp.Body)
 		for scanner.Scan() {
@@ -146,9 +147,10 @@ func (c *Gemini) Stream(ctx context.Context, req *core.ChatRequest, creds core.C
 			if !ok {
 				continue
 			}
-			chunks, perr := c.codec.ParseStreamLine([]byte(payload), req.Model)
+			chunks, perr := parser.ParseStreamLine([]byte(payload), req.Model)
 			if perr != nil {
-				continue
+				sendStreamParseError(ctx, out, c.id, req.Model, perr)
+				return
 			}
 			for _, ch := range chunks {
 				ttft.maybeReport(ch)
@@ -160,10 +162,7 @@ func (c *Gemini) Stream(ctx context.Context, req *core.ChatRequest, creds core.C
 			}
 		}
 		if err := scanner.Err(); err != nil {
-			out <- core.StreamChunk{
-				Type: core.ChunkError,
-				Err:  &core.ProviderError{Kind: core.ErrTimeout, Provider: c.id, Model: req.Model, Message: err.Error(), Cause: err},
-			}
+			sendStreamError(ctx, out, core.ErrTimeout, c.id, req.Model, err)
 		}
 	}()
 	return out, nil

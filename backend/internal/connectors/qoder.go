@@ -1081,7 +1081,10 @@ func (c *Qoder) Stream(ctx context.Context, req *core.ChatRequest, creds core.Cr
 			line := scanner.Text()
 			inner, ok, qerr := unwrapQoderSSELineWithError(line, c.id, req.Model)
 			if qerr != nil {
-				out <- core.StreamChunk{Type: core.ChunkError, Err: qerr}
+				select {
+				case out <- core.StreamChunk{Type: core.ChunkError, Err: qerr}:
+				case <-ctx.Done():
+				}
 				return
 			}
 			if !ok {
@@ -1097,7 +1100,8 @@ func (c *Qoder) Stream(ctx context.Context, req *core.ChatRequest, creds core.Cr
 
 			chunks, perr := c.codec.ParseStreamLine([]byte(inner), req.Model)
 			if perr != nil {
-				continue // skip malformed chunk
+				sendStreamError(ctx, out, core.ErrUpstream, c.id, req.Model, perr)
+				return
 			}
 			for _, ch := range chunks {
 				ttft.maybeReport(ch)
@@ -1109,10 +1113,7 @@ func (c *Qoder) Stream(ctx context.Context, req *core.ChatRequest, creds core.Cr
 			}
 		}
 		if err := scanner.Err(); err != nil {
-			out <- core.StreamChunk{
-				Type: core.ChunkError,
-				Err:  &core.ProviderError{Kind: core.ErrTimeout, Provider: c.id, Model: req.Model, Message: err.Error(), Cause: err},
-			}
+			sendStreamError(ctx, out, core.ErrTimeout, c.id, req.Model, err)
 		}
 	}()
 	return out, nil

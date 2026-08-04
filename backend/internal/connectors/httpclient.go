@@ -466,6 +466,36 @@ type streamParser interface {
 	ParseStreamLine(line []byte, model string) ([]core.StreamChunk, error)
 }
 
+func responseIntegrityError(provider, model string, err error) *core.ProviderError {
+	return &core.ProviderError{
+		Kind: core.ErrResponseIntegrity, Scope: core.FailureScopeRequest,
+		Provider: provider, Model: model, Message: err.Error(), Cause: err,
+	}
+}
+
+func sendStreamError(ctx context.Context, out chan<- core.StreamChunk, kind core.ErrorKind, provider, model string, err error) {
+	select {
+	case out <- core.StreamChunk{Type: core.ChunkError, Err: &core.ProviderError{Kind: kind, Provider: provider, Model: model, Message: err.Error(), Cause: err}}:
+	case <-ctx.Done():
+	}
+}
+
+func sendStreamParseError(ctx context.Context, out chan<- core.StreamChunk, provider, model string, err error) {
+	var pe *core.ProviderError
+	if errors.As(err, &pe) {
+		copy := *pe
+		copy.Provider = provider
+		copy.Model = model
+		pe = &copy
+	} else {
+		pe = responseIntegrityError(provider, model, err)
+	}
+	select {
+	case out <- core.StreamChunk{Type: core.ChunkError, Err: pe}:
+	case <-ctx.Done():
+	}
+}
+
 // ttftTracker fires OnFirstChunk exactly once per stream, measuring elapsed
 // time from the pipeline's StartedAt (preferred) or the scanner's own start
 // time. This eliminates the duplicated ttftReported + isMeaningfulChunk boilerplate
@@ -530,7 +560,8 @@ func scanOpenAISSE(ctx context.Context, provider, model string, resp *http.Respo
 			}
 			chunks, perr := codec.ParseStreamLine([]byte(payload), model)
 			if perr != nil {
-				continue
+				sendStreamError(ctx, out, core.ErrResponseIntegrity, provider, model, perr)
+				return
 			}
 			for _, ch := range chunks {
 				ttft.maybeReport(ch)
@@ -542,10 +573,7 @@ func scanOpenAISSE(ctx context.Context, provider, model string, resp *http.Respo
 			}
 		}
 		if err := scanner.Err(); err != nil {
-			out <- core.StreamChunk{
-				Type: core.ChunkError,
-				Err:  &core.ProviderError{Kind: core.ErrTimeout, Provider: provider, Model: model, Message: err.Error(), Cause: err},
-			}
+			sendStreamError(ctx, out, core.ErrTimeout, provider, model, err)
 		}
 	}()
 	return out
@@ -765,7 +793,8 @@ func checkNonJSONResponse(provider, model string, resp *http.Response, body []by
 		}
 	}
 	return &core.ProviderError{
-		Kind:     core.ErrUpstream,
+		Kind:     core.ErrResponseIntegrity,
+		Scope:    core.FailureScopeRequest,
 		Provider: provider,
 		Model:    model,
 		Message: fmt.Sprintf("upstream returned a non-JSON response (HTTP %d, content-type %q); "+

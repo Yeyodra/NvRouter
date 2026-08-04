@@ -50,7 +50,7 @@ type ollamaToolCall struct {
 	Type     string `json:"type,omitempty"`
 	ID       string `json:"id,omitempty"`
 	Function struct {
-		Index     int             `json:"index,omitempty"`
+		Index     *int            `json:"index,omitempty"`
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
 	} `json:"function"`
@@ -251,7 +251,7 @@ func (OllamaCodec) ParseResponse(body []byte, model string) (*core.ChatResponse,
 	if raw.Message.Content != "" {
 		msg.Content = append(msg.Content, core.ContentPart{Type: core.PartText, Text: raw.Message.Content})
 	}
-	finish := core.FinishStop
+	finish := mapOllamaFinish(raw.DoneReason)
 	for i, tc := range raw.Message.ToolCalls {
 		args := tc.Function.Arguments
 		if len(args) == 0 {
@@ -306,8 +306,9 @@ func (OllamaCodec) RenderResponse(resp *core.ChatResponse) ([]byte, error) {
 				if len(args) == 0 {
 					args = json.RawMessage("{}")
 				}
-				fn := map[string]any{"name": p.ToolCall.Name, "arguments": args}
-				toolCalls = append(toolCalls, map[string]any{"type": "function", "function": fn})
+				idx := len(toolCalls)
+				fn := map[string]any{"index": idx, "name": p.ToolCall.Name, "arguments": args}
+				toolCalls = append(toolCalls, map[string]any{"type": "function", "id": p.ToolCall.ID, "function": fn})
 			}
 		}
 	}
@@ -318,10 +319,7 @@ func (OllamaCodec) RenderResponse(resp *core.ChatResponse) ([]byte, error) {
 	if len(toolCalls) > 0 {
 		msg["tool_calls"] = toolCalls
 	}
-	doneReason := "stop"
-	if resp.FinishReason == core.FinishToolCalls {
-		doneReason = "tool_calls"
-	}
+	doneReason := renderOllamaFinish(resp.FinishReason)
 	out := map[string]any{
 		"model":             resp.Model,
 		"message":           msg,
@@ -335,10 +333,24 @@ func (OllamaCodec) RenderResponse(resp *core.ChatResponse) ([]byte, error) {
 
 // ---- streaming (NDJSON, not SSE) --------------------------------------------
 
+type OllamaStreamParser struct {
+	indices       map[string]int
+	nextToolIndex int
+	hadTool       bool
+}
+
+func (OllamaCodec) NewStreamParser() *OllamaStreamParser {
+	return &OllamaStreamParser{indices: map[string]int{}}
+}
+
 // ParseStreamLine decodes one Ollama NDJSON line into canonical chunks. Unlike
 // SSE dialects, Ollama lines are bare JSON objects with no "data:" prefix; the
 // connector passes each raw line here.
 func (OllamaCodec) ParseStreamLine(line []byte, model string) ([]core.StreamChunk, error) {
+	return OllamaCodec{}.NewStreamParser().ParseStreamLine(line, model)
+}
+
+func (p *OllamaStreamParser) ParseStreamLine(line []byte, _ string) ([]core.StreamChunk, error) {
 	line = bytes.TrimSpace(line)
 	if len(line) == 0 {
 		return nil, nil
@@ -355,27 +367,40 @@ func (OllamaCodec) ParseStreamLine(line []byte, model string) ([]core.StreamChun
 	if raw.Message.Content != "" {
 		chunks = append(chunks, core.StreamChunk{Type: core.ChunkText, Delta: raw.Message.Content})
 	}
-	hadTool := false
-	for i, tc := range raw.Message.ToolCalls {
+	for _, tc := range raw.Message.ToolCalls {
 		args := tc.Function.Arguments
 		if len(args) == 0 {
 			args = json.RawMessage("{}")
 		}
 		id := tc.ID
+		idx, known := p.indices[id]
 		if id == "" {
-			id = fmt.Sprintf("call_%d", i)
+			idx = p.nextToolIndex
+			id = fmt.Sprintf("call_%d", idx)
+		} else if !known {
+			idx = p.nextToolIndex
+			if tc.Function.Index != nil {
+				idx = *tc.Function.Index
+			}
+		}
+		if !known {
+			p.indices[id] = idx
+			if idx >= p.nextToolIndex {
+				p.nextToolIndex = idx + 1
+			}
 		}
 		chunks = append(chunks, core.StreamChunk{
-			Type:     core.ChunkToolCall,
-			Index:    tc.Function.Index,
-			ToolCall: &core.ToolCall{ID: id, Name: tc.Function.Name, Arguments: args},
+			Type:             core.ChunkToolCall,
+			Index:            idx,
+			ToolArgumentMode: core.ToolArgumentComplete,
+			ToolCall:         &core.ToolCall{ID: id, Name: tc.Function.Name, Arguments: args},
 		})
-		hadTool = true
+		p.hadTool = true
 	}
 
 	if raw.Done {
-		finish := core.FinishStop
-		if raw.DoneReason == "tool_calls" || hadTool {
+		finish := mapOllamaFinish(raw.DoneReason)
+		if p.hadTool && finish == core.FinishStop {
 			finish = core.FinishToolCalls
 		}
 		chunks = append(chunks, core.StreamChunk{Type: core.ChunkFinish, FinishReason: finish})
@@ -416,16 +441,25 @@ func (OllamaCodec) RenderStreamChunk(chunk core.StreamChunk, state *StreamState)
 		if len(args) == 0 {
 			args = json.RawMessage("{}")
 		}
-		fn := map[string]any{"name": chunk.ToolCall.Name, "arguments": args}
+		if !validCompleteToolArguments(args) {
+			return nil, fmt.Errorf("ollama: tool arguments must be a JSON object")
+		}
+		fn := map[string]any{"index": chunk.Index, "name": chunk.ToolCall.Name, "arguments": args}
 		return [][]byte{ollamaLine(map[string]any{
 			"model": state.Model,
 			"message": map[string]any{
 				"role":       "assistant",
 				"content":    "",
-				"tool_calls": []map[string]any{{"type": "function", "function": fn}},
+				"tool_calls": []map[string]any{{"type": "function", "id": chunk.ToolCall.ID, "function": fn}},
 			},
 			"done": false,
 		})}, nil
+	case core.ChunkFinish:
+		if state.Custom == nil {
+			state.Custom = map[string]any{}
+		}
+		state.Custom["done_reason"] = string(chunk.FinishReason)
+		return nil, nil
 	case core.ChunkUsage:
 		if chunk.Usage == nil {
 			return nil, nil
@@ -445,11 +479,15 @@ func (OllamaCodec) RenderStreamChunk(chunk core.StreamChunk, state *StreamState)
 // captured from the final usage chunk.
 func (OllamaCodec) RenderStreamDone(state *StreamState) [][]byte {
 	final := map[string]any{
-		"model":   state.Model,
-		"message": map[string]any{"role": "assistant", "content": ""},
-		"done":    true,
+		"model":       state.Model,
+		"message":     map[string]any{"role": "assistant", "content": ""},
+		"done":        true,
+		"done_reason": "stop",
 	}
 	if state.Custom != nil {
+		if v, ok := state.Custom["done_reason"].(string); ok && v != "" {
+			final["done_reason"] = v
+		}
 		if v, ok := state.Custom["prompt_tokens"].(int); ok {
 			final["prompt_eval_count"] = v
 		}
@@ -458,6 +496,28 @@ func (OllamaCodec) RenderStreamDone(state *StreamState) [][]byte {
 		}
 	}
 	return [][]byte{ollamaLine(final)}
+}
+
+func mapOllamaFinish(reason string) core.FinishReason {
+	switch reason {
+	case "length":
+		return core.FinishLength
+	case "tool_calls":
+		return core.FinishToolCalls
+	default:
+		return core.FinishStop
+	}
+}
+
+func renderOllamaFinish(reason core.FinishReason) string {
+	switch reason {
+	case core.FinishLength:
+		return "length"
+	case core.FinishToolCalls:
+		return "tool_calls"
+	default:
+		return "stop"
+	}
 }
 
 // ollamaLine formats one NDJSON line (compact JSON + newline).

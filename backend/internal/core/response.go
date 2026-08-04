@@ -63,6 +63,15 @@ const (
 	ChunkPing     ChunkType = "ping"      // keep-alive / no-op
 )
 
+// ToolArgumentMode declares how a streamed tool argument update applies.
+type ToolArgumentMode string
+
+const (
+	ToolArgumentDelta    ToolArgumentMode = "delta"
+	ToolArgumentSnapshot ToolArgumentMode = "snapshot"
+	ToolArgumentComplete ToolArgumentMode = "complete"
+)
+
 // StreamChunk is one provider-agnostic streaming event. The transform layer
 // renders a sequence of these into the caller's SSE dialect.
 type StreamChunk struct {
@@ -72,9 +81,10 @@ type StreamChunk struct {
 	Delta string `json:"delta,omitempty"`
 
 	// ToolCall carries a (possibly partial) tool invocation. Index identifies
-	// which tool call this delta belongs to when multiple are streamed.
-	ToolCall *ToolCall `json:"tool_call,omitempty"`
-	Index    int       `json:"index,omitempty"`
+	// the call; ToolArgumentMode declares whether arguments append or replace.
+	ToolCall         *ToolCall        `json:"tool_call,omitempty"`
+	Index            int              `json:"index,omitempty"`
+	ToolArgumentMode ToolArgumentMode `json:"tool_argument_mode,omitempty"`
 
 	// Signature carries opaque reasoning-block data to echo back on later turns.
 	Signature string `json:"signature,omitempty"`

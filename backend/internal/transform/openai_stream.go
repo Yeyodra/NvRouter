@@ -71,8 +71,9 @@ func (OpenAICodec) ParseStreamLine(line []byte, model string) ([]core.StreamChun
 		}
 		for _, tc := range c.Delta.ToolCalls {
 			chunks = append(chunks, core.StreamChunk{
-				Type:  core.ChunkToolCall,
-				Index: tc.Index,
+				Type:             core.ChunkToolCall,
+				Index:            tc.Index,
+				ToolArgumentMode: core.ToolArgumentDelta,
 				ToolCall: &core.ToolCall{
 					ID:        tc.ID,
 					Name:      firstNonEmpty(tc.Function.Name, tc.Name),
@@ -137,80 +138,9 @@ func normalizeOpenAIToolArguments(raw json.RawMessage) json.RawMessage {
 
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
-		normalized := normalizeOpenAIToolArguments(json.RawMessage(s))
-		if len(normalized) > 0 {
-			return normalized
-		}
-		return json.RawMessage(s)
+		raw = json.RawMessage(s)
 	}
-
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &obj); err == nil {
-		if nested := unwrapOpenAIToolArgumentObject(obj); nested != nil {
-			return nested
-		}
-		if out, err := json.Marshal(obj); err == nil {
-			return out
-		}
-	}
-
-	if json.Valid(raw) {
-		return raw
-	}
-	return nil
-}
-
-func unwrapOpenAIToolArgumentObject(obj map[string]json.RawMessage) json.RawMessage {
-	for _, key := range []string{
-		"input", "arguments", "parameters", "args",
-		"tool_input", "toolInput", "tool_arguments", "toolArguments",
-		"tool_parameters", "toolParameters", "payload", "data",
-	} {
-		nestedRaw, ok := obj[key]
-		if !ok {
-			continue
-		}
-		if nested := normalizeNestedOpenAIToolObject(nestedRaw); nested != nil {
-			return nested
-		}
-	}
-
-	if len(obj) == 1 {
-		for _, nestedRaw := range obj {
-			if nested := normalizeNestedOpenAIToolObject(nestedRaw); nested != nil {
-				return nested
-			}
-		}
-	}
-	return nil
-}
-
-func normalizeNestedOpenAIToolObject(raw json.RawMessage) json.RawMessage {
-	raw = bytes.TrimSpace(raw)
-	if len(raw) == 0 {
-		return nil
-	}
-
-	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
-		return normalizeNestedOpenAIToolObject(json.RawMessage(s))
-	}
-
-	if raw[0] != '{' {
-		return nil
-	}
-	var nested map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &nested); err != nil || len(nested) == 0 {
-		return nil
-	}
-	if deeper := unwrapOpenAIToolArgumentObject(nested); deeper != nil {
-		return deeper
-	}
-	out, err := json.Marshal(nested)
-	if err != nil {
-		return nil
-	}
-	return out
+	return raw
 }
 
 // RenderStreamChunk encodes a canonical chunk as an OpenAI SSE event. The first
@@ -236,20 +166,26 @@ func (OpenAICodec) RenderStreamChunk(chunk core.StreamChunk, state *StreamState)
 		delta["content"] = chunk.Delta
 
 	case core.ChunkToolCall:
+		if chunk.ToolCall == nil {
+			return nil, fmt.Errorf("openai: missing tool call")
+		}
+		args := chunk.ToolCall.Arguments
+		if len(args) == 0 {
+			args = json.RawMessage("{}")
+		}
+		if !validCompleteToolArguments(args) {
+			return nil, fmt.Errorf("openai: tool arguments must be a JSON object")
+		}
 		if !state.SentRole {
 			delta["role"] = "assistant"
 			state.SentRole = true
-		}
-		args := string(chunk.ToolCall.Arguments)
-		if args == "" {
-			args = "{}"
 		}
 		tc := map[string]any{
 			"index": chunk.Index,
 			"type":  "function",
 			"function": map[string]string{
 				"name":      chunk.ToolCall.Name,
-				"arguments": args,
+				"arguments": string(args),
 			},
 		}
 		if chunk.ToolCall.ID != "" {
