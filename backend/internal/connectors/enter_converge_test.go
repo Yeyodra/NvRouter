@@ -24,6 +24,29 @@ func enterTestRequest(model string) *core.ChatRequest {
 	}
 }
 
+func TestEnterCanonicalModelUsesNativeUpstreamID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["model"] != "openai/gpt-5.6-sol" {
+			t.Fatalf("upstream model = %v, want openai/gpt-5.6-sol", body["model"])
+		}
+		_, _ = w.Write([]byte(`{"model":"openai/gpt-5.6-sol","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	c := NewEnterConverge(server.URL)
+	resp, err := c.Chat(context.Background(), enterTestRequest("gpt-5.6-sol"), core.Credentials{APIKey: "ek_test", Extra: map[string]string{"workspace_id": "ws"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Model != "gpt-5.6-sol" {
+		t.Fatalf("response model = %q, want gpt-5.6-sol", resp.Model)
+	}
+}
+
 func TestEnterWorkspaceResolutionHeadersCacheAndValidation(t *testing.T) {
 	var workspaces int32
 	var server *httptest.Server
@@ -57,7 +80,7 @@ func TestEnterWorkspaceResolutionHeadersCacheAndValidation(t *testing.T) {
 	if atomic.LoadInt32(&workspaces) != 1 {
 		t.Fatalf("workspace calls = %d, want 1", workspaces)
 	}
-	if len(models) != 1 || models[0].ID != "openai/gpt-5.6-sol" {
+	if len(models) != 1 || models[0].ID != "gpt-5.6-sol" {
 		t.Fatalf("models = %+v", models)
 	}
 	if got := enterStoredWorkspace(core.Credentials{Extra: map[string]string{"workspaceId": "camel", "workspace_id": "snake"}}); got != "camel" {

@@ -62,7 +62,7 @@ func (r *UsageRepo) RecordBatch(ctx context.Context, records []UsageRecord) erro
 	return nil
 }
 
-const usageColumns = `id, request_id, tenant_id, project_id, api_key_id, provider, model, public_model, account_id, client,
+const usageColumns = `id, request_id, tenant_id, project_id, api_key_id, client_ip, provider, model, public_model, account_id, client,
 	status, error_kind, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens,
 	reasoning_tokens, usage_source, cost_micros, cost_nanos, input_cost_nanos, cached_cost_nanos,
 	cache_write_cost_nanos, output_cost_nanos, reasoning_cost_nanos, avoided_cost_nanos, saved_cost_nanos,
@@ -114,7 +114,7 @@ func usageArgs(u UsageRecord) []any {
 		u.CostMicros = (u.CostNanos + 500) / 1000
 	}
 	return []any{
-		u.ID, u.RequestID, u.TenantID, nullString(u.ProjectID), nullString(u.APIKeyID),
+		u.ID, u.RequestID, u.TenantID, nullString(u.ProjectID), nullString(u.APIKeyID), u.ClientIP,
 		u.Provider, u.Model, nullString(u.PublicModel), nullString(u.AccountID), u.Client, u.Status, u.ErrorKind,
 		u.PromptTokens, u.CompletionTokens, u.CachedTokens, u.CacheWriteTokens,
 		u.ReasoningTokens, u.UsageSource, u.CostMicros, u.CostNanos,
@@ -377,6 +377,7 @@ func (r *UsageRepo) Breakdown(ctx context.Context, tenantID string, since time.T
 // RecentRecord is a single recent request row for the activity feed and console.
 type RecentRecord struct {
 	ID               string
+	ClientIP         string
 	Provider         string
 	Model            string
 	PromptTokens     int
@@ -791,7 +792,7 @@ func (r *UsageRepo) RecentByKey(ctx context.Context, keyID string, since time.Ti
 		limit = 100
 	}
 	q := r.db.rebind(`
-		SELECT id, CASE WHEN public_model IS NULL OR public_model = '' THEN 'legacy' ELSE public_model END,
+		SELECT id, client_ip, CASE WHEN public_model IS NULL OR public_model = '' THEN 'legacy' ELSE public_model END,
 		       prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens, cost_micros,
 		       cache_hit, latency_ms, ttft_ms, slim_bytes_saved, slim_tokens_saved, slim_rules,
 		       slim_active, caveman_active, terse_active, headroom_tokens_saved, headroom_bytes_saved,
@@ -814,7 +815,7 @@ func (r *UsageRepo) RecentByKey(ctx context.Context, keyID string, since time.Ti
 			slimActive                     int
 			createdAt                      string
 		)
-		if err := rows.Scan(&rec.ID, &rec.Model, &rec.PromptTokens, &rec.CompletionTokens,
+		if err := rows.Scan(&rec.ID, &rec.ClientIP, &rec.Model, &rec.PromptTokens, &rec.CompletionTokens,
 			&rec.CachedTokens, &rec.CacheWriteTokens, &rec.CostMicros, &cacheHit, &rec.LatencyMS, &rec.TTFTMS,
 			&rec.SlimBytesSaved, &rec.SlimTokensSaved, &rec.SlimRules, &slimActive, &caveman, &terse,
 			&rec.HeadroomTokensSaved, &rec.HeadroomBytesSaved, &headroomActive, &ponytailActive,
@@ -829,6 +830,51 @@ func (r *UsageRepo) RecentByKey(ctx context.Context, keyID string, since time.Ti
 		rec.PonytailActive = ponytailActive != 0
 		rec.CreatedAt = parseTime(createdAt)
 		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
+// IPActivity is usage aggregated by one tracked client address.
+type IPActivity struct {
+	IP                  string
+	Requests, Tokens    int64
+	FirstSeen, LastSeen time.Time
+}
+
+// KeyIPActivity summarizes tracked client addresses for one API key.
+type KeyIPActivity struct {
+	TotalRequests, TotalTokens int64
+	IPs                        []IPActivity
+}
+
+// IPActivityByKey returns up to 500 tracked IPs ranked by token volume.
+// Legacy rows without an IP are excluded from both rows and totals.
+func (r *UsageRepo) IPActivityByKey(ctx context.Context, keyID string, since time.Time) (KeyIPActivity, error) {
+	q := r.db.rebind(`
+		SELECT client_ip, COUNT(*), COALESCE(SUM(prompt_tokens + completion_tokens), 0),
+		       MIN(created_at), MAX(created_at)
+		FROM usage_records
+		WHERE api_key_id = ? AND created_at >= ? AND client_ip <> ''
+		GROUP BY client_ip
+		ORDER BY 3 DESC, 2 DESC, client_ip ASC
+		LIMIT 500`)
+	rows, err := r.db.sql.QueryContext(ctx, q, keyID, formatTime(since))
+	if err != nil {
+		return KeyIPActivity{}, fmt.Errorf("store: IP activity by key: %w", err)
+	}
+	defer rows.Close()
+
+	var out KeyIPActivity
+	for rows.Next() {
+		var ip IPActivity
+		var firstSeen, lastSeen string
+		if err := rows.Scan(&ip.IP, &ip.Requests, &ip.Tokens, &firstSeen, &lastSeen); err != nil {
+			return KeyIPActivity{}, err
+		}
+		ip.FirstSeen, ip.LastSeen = parseTime(firstSeen), parseTime(lastSeen)
+		out.TotalRequests += ip.Requests
+		out.TotalTokens += ip.Tokens
+		out.IPs = append(out.IPs, ip)
 	}
 	return out, rows.Err()
 }

@@ -1046,7 +1046,7 @@ function BrandingTab() {
 
   if (branding.isLoading || !local) return <Spinner />;
 
-  const previewLogo = local.logo_url || "/nvrouter-logo.svg";
+  const previewLogo = local.logo_url || "/nvrouter-mark.svg";
 
   return (
     <Card>

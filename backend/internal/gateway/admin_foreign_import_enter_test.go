@@ -65,6 +65,19 @@ func TestForeignEnterImportPreservesWorkspaceAndLiteralModelLocks(t *testing.T) 
 	require.True(t, active)
 }
 
+func TestForeignEnterImportCanonicalizesKnownNativeModelLock(t *testing.T) {
+	s, db := newBulkTestServer(t)
+	payload := []byte(`[{"id":"ec-canonical","provider":"enter-converge","authType":"apiKey","apiKey":"ek_secret","modelLock_openai/gpt-5.6-sol":1893456000000}]`)
+	result := &foreignImportResult{}
+	s.importN9routerConnections(context.Background(), map[string]json.RawMessage{"providerConnections": payload}, result, nil)
+	require.Equal(t, 1, result.Accounts, result.Errors)
+	accounts, err := db.Accounts().ListByProvider(context.Background(), adminTenant, "enter-converge")
+	require.NoError(t, err)
+	active, err := db.Routing().IsModelCooldownActive(context.Background(), accounts[0].ID, "gpt-5.6-sol")
+	require.NoError(t, err)
+	require.True(t, active)
+}
+
 func TestForeignEnterImportRejectsMalformedSecretAndLock(t *testing.T) {
 	s, _ := newBulkTestServer(t)
 	payload := []byte(`[{"id":"bad-key","provider":"enter-converge","authType":"apiKey","apiKey":"sk_bad"},{"id":"bad-lock","provider":"enter-converge","authType":"apiKey","apiKey":"ek_ok","modelLock_openai/gpt":"never"}]`)
@@ -80,7 +93,7 @@ func TestN9routerEnterExportRequiresSecretAcknowledgementAndEmitsLocks(t *testin
 	result := &foreignImportResult{}
 	s.importN9routerConnections(context.Background(), map[string]json.RawMessage{"providerConnections": payload}, result, nil)
 	accounts, _ := db.Accounts().ListByProvider(context.Background(), adminTenant, "enter-converge")
-	require.NoError(t, db.Routing().SetModelCooldown(context.Background(), accounts[0].ID, "vendor/model.with.dot", time.Now().Add(time.Hour)))
+	require.NoError(t, db.Routing().SetModelCooldown(context.Background(), accounts[0].ID, "gpt-5.6-sol", time.Now().Add(time.Hour)))
 
 	denied := httptest.NewRecorder()
 	s.adminExportDatabase(denied, httptest.NewRequest("GET", "/admin/export?format=9router", nil))
@@ -98,8 +111,8 @@ func TestN9routerEnterExportRequiresSecretAcknowledgementAndEmitsLocks(t *testin
 	body := rec.Body.String()
 	require.Contains(t, body, `"apiKey":"ek_secret"`)
 	require.Contains(t, body, `"workspaceId":"ws-9"`)
-	require.Contains(t, body, `"modelLock_vendor/model.with.dot"`)
+	require.Contains(t, body, `"modelLock_openai/gpt-5.6-sol"`)
 	require.Contains(t, body, "T")
-	require.NotContains(t, body, `"modelLock_vendor/model.with.dot":1`)
+	require.NotContains(t, body, `"modelLock_openai/gpt-5.6-sol":1`)
 	require.True(t, strings.HasPrefix(body, "{"))
 }

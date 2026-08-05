@@ -165,6 +165,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request, dialect core
 		ClientKind:    client,
 		SourceDialect: dialect,
 		APIKeyID:      key.ID,
+		ClientIP:      clientIP(r),
 		PublicModel:   req.Model,
 		TenantID:      tenantID,
 		ProjectID:     key.ProjectID,
@@ -1454,6 +1455,7 @@ func (s *Server) handlePortalKeyUsage(w http.ResponseWriter, r *http.Request) {
 	for _, rec := range recent {
 		entry := map[string]any{
 			"id":                rec.ID,
+			"client_ip":         rec.ClientIP,
 			"model":             rec.Model,
 			"prompt_tokens":     rec.PromptTokens,
 			"completion_tokens": rec.CompletionTokens,
@@ -1494,6 +1496,19 @@ func (s *Server) handlePortalKeyUsage(w http.ResponseWriter, r *http.Request) {
 		recentOut = append(recentOut, entry)
 	}
 
+	activity, _ := s.usage.IPActivityByKey(ctx, key.ID, now.AddDate(0, 0, -days))
+	ipOut := make([]map[string]any, 0, len(activity.IPs))
+	for _, ip := range activity.IPs {
+		share := float64(0)
+		if activity.TotalTokens > 0 {
+			share = float64(ip.Tokens) / float64(activity.TotalTokens) * 100
+		}
+		ipOut = append(ipOut, map[string]any{
+			"ip": ip.IP, "requests": ip.Requests, "tokens": ip.Tokens,
+			"share_pct": share, "first_seen": ip.FirstSeen, "last_seen": ip.LastSeen,
+		})
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"key_id":         key.ID,
 		"key_name":       key.Name,
@@ -1508,7 +1523,12 @@ func (s *Server) handlePortalKeyUsage(w http.ResponseWriter, r *http.Request) {
 		"daily":  dailyOut,
 		"models": modelOut,
 		"recent": recentOut,
-		"days":   days,
+		"ip_activity": map[string]any{
+			"total_requests": activity.TotalRequests,
+			"total_tokens":   activity.TotalTokens,
+			"ips":            ipOut,
+		},
+		"days": days,
 	})
 }
 

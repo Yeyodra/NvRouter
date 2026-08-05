@@ -102,8 +102,13 @@ func TestPortalUsageProjectsPublicModelsAndRecent(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var body struct {
-		Models []map[string]any `json:"models"`
-		Recent []map[string]any `json:"recent"`
+		Models     []map[string]any `json:"models"`
+		Recent     []map[string]any `json:"recent"`
+		IPActivity struct {
+			TotalRequests int64            `json:"total_requests"`
+			TotalTokens   int64            `json:"total_tokens"`
+			IPs           []map[string]any `json:"ips"`
+		} `json:"ip_activity"`
 	}
 	raw, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
@@ -116,14 +121,18 @@ func TestPortalUsageProjectsPublicModelsAndRecent(t *testing.T) {
 		require.False(t, hasProvider)
 	}
 	require.ElementsMatch(t, []any{publicModelCanary, "legacy"}, []any{body.Recent[0]["model"], body.Recent[1]["model"]})
+	require.ElementsMatch(t, []any{"203.0.113.10", "2001:db8::1"}, []any{body.Recent[0]["client_ip"], body.Recent[1]["client_ip"]})
+	require.Equal(t, int64(2), body.IPActivity.TotalRequests)
+	require.Len(t, body.IPActivity.IPs, 2)
+	require.ElementsMatch(t, []any{"203.0.113.10", "2001:db8::1"}, []any{body.IPActivity.IPs[0]["ip"], body.IPActivity.IPs[1]["ip"]})
 }
 
 func seedUsageProjectionCanaries(t *testing.T, h *e2eHarness) {
 	t.Helper()
 	now := time.Now().UTC()
 	for _, rec := range []store.UsageRecord{
-		{ID: "usage-public", APIKeyID: h.keyID, Provider: "internal-provider-canary", Model: "internal-model-canary", PublicModel: publicModelCanary, AccountID: "internal-account-canary", CreatedAt: now},
-		{ID: "usage-legacy", APIKeyID: h.keyID, Provider: "internal-provider-canary", Model: "internal-model-canary", AccountID: "internal-account-canary", CreatedAt: now},
+		{ID: "usage-public", APIKeyID: h.keyID, Provider: "internal-provider-canary", Model: "internal-model-canary", PublicModel: publicModelCanary, AccountID: "internal-account-canary", ClientIP: "203.0.113.10", CreatedAt: now},
+		{ID: "usage-legacy", APIKeyID: h.keyID, Provider: "internal-provider-canary", Model: "internal-model-canary", AccountID: "internal-account-canary", ClientIP: "2001:db8::1", CreatedAt: now},
 	} {
 		require.NoError(t, h.usage.Record(context.Background(), rec))
 	}

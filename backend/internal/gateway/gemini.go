@@ -62,6 +62,7 @@ func (s *Server) handleGeminiGenerate(w http.ResponseWriter, r *http.Request) {
 		ClientKind:    detectClient(r),
 		SourceDialect: core.DialectGemini,
 		APIKeyID:      key.ID,
+		ClientIP:      clientIP(r),
 		PublicModel:   req.Model,
 		TenantID:      tenantID,
 		ProjectID:     key.ProjectID,

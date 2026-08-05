@@ -73,6 +73,9 @@ func resolveTargets(ctx context.Context, chains ChainSource, aliases AliasSource
 		if spec, ok := connectors.SpecByAlias(provider); ok {
 			provider = spec.ID
 		}
+		if provider == "enter-converge" {
+			rest = connectors.EnterCanonicalModelID(rest)
+		}
 		return resolveResult{Targets: []dispatch.Target{{Provider: provider, Model: rest}}}, nil
 	}
 

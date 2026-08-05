@@ -270,8 +270,8 @@ function SidebarContent({ onNavigate }: { onNavigate: () => void }) {
             <img src={logoSrc} alt={label} className="h-12 w-full object-contain object-left" />
           ) : (
             <>
-              <img src="/nvrouter-logo.svg" alt={label} className="h-12 w-full object-contain object-left dark:hidden" />
-              <img src="/nvrouter-logo-dark.svg" alt={label} className="hidden h-12 w-full object-contain object-left dark:block" />
+              <img src="/nvrouter-mark.svg" alt={label} className="h-12 w-full object-contain object-left dark:hidden" />
+              <img src="/nvrouter-mark-dark.svg" alt={label} className="hidden h-12 w-full object-contain object-left dark:block" />
             </>
           )}
         </div>

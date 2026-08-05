@@ -10,7 +10,7 @@ import { useBranding } from "../contexts/BrandingContext";
 import {
   AlertTriangle, CheckCircle2, Activity, ArrowDownRight, ArrowUpRight, DollarSign,
   LogOut, Layers, Key, Zap, Send, ChevronDown, Radio, TrendingUp, Coins, Calendar,
-  Trophy, Infinity as InfinityIcon, Clock, ChevronLeft, ChevronRight,
+  Trophy, Infinity as InfinityIcon, Clock, ChevronLeft, ChevronRight, Network, Copy, Check,
 } from "lucide-react";
 import { Card, Button, Input, Spinner, ErrorCard, Badge, SegmentedControl } from "../components/ui";
 
@@ -47,7 +47,7 @@ export function KeyPortalPage() {
     e.preventDefault();
     const val = apiKeyInput.trim();
     if (val) {
-      if (val.startsWith("sk-")) setParams({ key: val });
+      if (val.startsWith("kr_") || val.startsWith("sk-")) setParams({ key: val });
       else setParams({ id: val });
     }
   };
@@ -169,6 +169,8 @@ export function KeyPortalPage() {
           </div>
         </header>
 
+        <APIConnectionCard />
+
         {/* ── Date filter ────────────────────────────────────────────── */}
         <DateFilter days={days} onChange={setDays} />
 
@@ -217,6 +219,9 @@ export function KeyPortalPage() {
           />
         )}
 
+        {/* ── IP activity: shared-key traffic concentration ──────────── */}
+        {d.ip_activity && d.ip_activity.ips.length > 0 && <IPActivitySection activity={d.ip_activity} />}
+
         {/* ── Recent Requests table ──────────────────────────────────── */}
         {d.recent && d.recent.length > 0 && <RecentRequestsSection recent={d.recent} days={days} />}
 
@@ -226,6 +231,118 @@ export function KeyPortalPage() {
       </div>
     </div>
   );
+}
+
+function APIConnectionCard() {
+  const [copied, setCopied] = useState(false);
+  const baseURL = `${window.location.origin}/v1`;
+  const copy = async () => {
+    await navigator.clipboard.writeText(baseURL);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1800);
+  };
+
+  return (
+    <Card className="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+      <div className="min-w-0">
+        <p className="text-[10px] font-semibold uppercase tracking-widest text-[var(--text-muted)]">API Connection</p>
+        <div className="mt-1.5 flex min-w-0 items-center gap-2">
+          <span className="shrink-0 text-xs text-[var(--text-muted)]">Base URL</span>
+          <code className="min-w-0 truncate rounded-md bg-[var(--bg-subtle)] px-2 py-1 font-mono text-[13px] text-[var(--text)]" title={baseURL}>{baseURL}</code>
+        </div>
+      </div>
+      <Button variant="ghost" onClick={copy} className="h-10 shrink-0 justify-center border border-[var(--border)] sm:w-auto">
+        {copied ? <Check size={15} className="text-accent-500" /> : <Copy size={15} />}
+        {copied ? "Copied" : "Copy Base URL"}
+      </Button>
+    </Card>
+  );
+}
+
+// ─── IP Activity ────────────────────────────────────────────────────────────
+function IPActivitySection({ activity }: { activity: NonNullable<KeyUsageData["ip_activity"]> }) {
+  const PAGE_SIZE = 5;
+  const [page, setPage] = useState(0);
+  const totalPages = Math.max(1, Math.ceil(activity.ips.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages - 1);
+  const start = safePage * PAGE_SIZE;
+  const pageItems = activity.ips.slice(start, start + PAGE_SIZE);
+
+  return (
+    <section className="space-y-4">
+      <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+        <SectionTitle title="IP Activity" icon={<Network size={17} />} count={activity.ips.length} />
+        <p className="text-xs text-[var(--text-muted)]">Ranked by token volume</p>
+      </div>
+      <div className="grid grid-cols-3 gap-3">
+        <ActivityStat label="Tracked IPs" value={formatNumber(activity.ips.length)} />
+        <ActivityStat label="Requests" value={formatNumber(activity.total_requests)} />
+        <ActivityStat label="Tokens" value={formatTokens(activity.total_tokens)} />
+      </div>
+      <Card className="overflow-hidden">
+        <div className="divide-y divide-[var(--border)]">
+          {pageItems.map((row, index) => (
+            <div key={row.ip} className="grid gap-3 px-4 py-4 hover:bg-[var(--bg-subtle)]/30 sm:grid-cols-[minmax(180px,1fr)_90px_100px_minmax(150px,1fr)_140px] sm:items-center md:px-5">
+              <div className="flex min-w-0 items-center gap-3">
+                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[var(--bg-subtle)] text-[11px] font-semibold tabular-nums text-[var(--text-muted)]">{start + index + 1}</span>
+                <span className="min-w-0 break-all font-mono text-[13px] font-medium text-[var(--text)]">{row.ip}</span>
+              </div>
+              <ActivityMetric label="Requests" value={formatNumber(row.requests)} />
+              <ActivityMetric label="Tokens" value={formatTokens(row.tokens)} />
+              <div>
+                <div className="mb-1.5 flex items-center justify-between text-[11px] text-[var(--text-muted)]">
+                  <span>Traffic share</span><span className="font-medium tabular-nums text-[var(--text)]">{row.share_pct.toFixed(1)}%</span>
+                </div>
+                <div className="h-1.5 overflow-hidden rounded-full bg-[var(--bg-subtle)]">
+                  <div className="h-full rounded-full bg-accent-500" style={{ width: `${Math.min(100, row.share_pct)}%` }} />
+                </div>
+              </div>
+              <div className="flex justify-between gap-4 text-xs sm:block sm:text-right">
+                <span className="text-[var(--text-muted)] sm:hidden">Last seen</span>
+                <div><span className="font-medium text-[var(--text)]">{relTime(row.last_seen)} ago</span><span className="hidden text-[10px] text-[var(--text-muted)] sm:block">First {formatDateTime(row.first_seen)}</span></div>
+              </div>
+            </div>
+          ))}
+        </div>
+        {totalPages > 1 && (
+          <div className="flex items-center justify-between border-t border-[var(--border)] px-4 py-3">
+            <span className="text-[11px] text-[var(--text-muted)]">
+              Showing {start + 1}–{Math.min(start + PAGE_SIZE, activity.ips.length)} of {activity.ips.length}
+            </span>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => setPage((p) => Math.max(0, p - 1))}
+                disabled={safePage === 0}
+                className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--bg-elevated)] text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-subtle)] hover:text-[var(--text)] disabled:opacity-40 disabled:hover:bg-[var(--bg-elevated)] disabled:hover:text-[var(--text-muted)]"
+                aria-label="Previous IP page"
+              >
+                <ChevronLeft size={16} />
+              </button>
+              <span className="px-2 text-[12px] font-medium tabular-nums text-[var(--text)]">
+                {safePage + 1} / {totalPages}
+              </span>
+              <button
+                onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+                disabled={safePage === totalPages - 1}
+                className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--bg-elevated)] text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-subtle)] hover:text-[var(--text)] disabled:opacity-40 disabled:hover:bg-[var(--bg-elevated)] disabled:hover:text-[var(--text-muted)]"
+                aria-label="Next IP page"
+              >
+                <ChevronRight size={16} />
+              </button>
+            </div>
+          </div>
+        )}
+      </Card>
+    </section>
+  );
+}
+
+function ActivityStat({ label, value }: { label: string; value: string }) {
+  return <Card className="px-3 py-4 text-center sm:px-5 sm:text-left"><p className="text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">{label}</p><p className="mt-1 text-lg font-display font-semibold tabular-nums text-[var(--text)] sm:text-xl">{value}</p></Card>;
+}
+
+function ActivityMetric({ label, value }: { label: string; value: string }) {
+  return <div className="flex items-center justify-between text-xs sm:block sm:text-right"><span className="text-[var(--text-muted)] sm:hidden">{label}</span><span className="font-mono font-medium tabular-nums text-[var(--text)]">{value}</span></div>;
 }
 
 // ─── Date Filter ───────────────────────────────────────────────────────────
@@ -459,6 +576,7 @@ function RecentRequestsSection({ recent, days: _days }: { recent: PortalRecentRe
             <thead className="bg-[var(--bg-subtle)]/50 border-b border-[var(--border)]">
               <tr className="text-[11px] uppercase tracking-wide text-[var(--text-muted)]">
                 <th className="px-4 py-3 text-left font-semibold">Model</th>
+                <th className="px-4 py-3 text-left font-semibold">IP</th>
                 <th className="px-4 py-3 text-right font-semibold">
                   <span className="inline-flex items-center justify-end gap-1">
                     <ArrowDownRight size={12} className="text-[var(--color-chart-1)]" /> In
@@ -488,6 +606,9 @@ function RecentRequestsSection({ recent, days: _days }: { recent: PortalRecentRe
                           <span className="text-[11px] text-[var(--text-muted)] capitalize truncate">{r.provider}</span>
                         </div>
                       </div>
+                    </td>
+                    <td className="max-w-44 truncate whitespace-nowrap px-4 py-3 font-mono text-[12px] text-[var(--text-muted)]" title={r.client_ip}>
+                      {r.client_ip || "—"}
                     </td>
                     <td className="px-4 py-3 text-right tabular-nums font-mono text-[13px] text-[var(--text)]">
                       <span className="inline-flex items-center justify-end gap-1.5">
@@ -996,13 +1117,13 @@ function ChartTooltip({ active, payload, label, metric: _metric, simple }: any) 
   );
 }
 
-function ProviderIcon({ provider, className }: { provider: string; className?: string }) {
+function ProviderIcon({ provider, className }: { provider?: string; className?: string }) {
   const [errored, setErrored] = useState(false);
   const sizeClass = className || "h-10 w-10";
-  if (errored) {
+  if (!provider || errored) {
     return (
       <div className={`flex shrink-0 items-center justify-center rounded-xl bg-[var(--bg-elevated)] border border-[var(--border)] shadow-sm text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider ${sizeClass}`}>
-        {provider.slice(0, 2)}
+        {provider ? provider.slice(0, 2) : <Layers className="h-4 w-4" />}
       </div>
     );
   }

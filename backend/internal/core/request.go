@@ -109,6 +109,8 @@ type RequestMetadata struct {
 	SourceDialect Dialect
 	// APIKeyID is the id of the authenticated KeiRouter key (for metering/audit).
 	APIKeyID string
+	// ClientIP is the normalized caller address recorded for key usage.
+	ClientIP string
 	// PublicModel is the inbound customer-visible model or route.
 	PublicModel string
 	// TenantID / ProjectID scope the request for multi-tenant deployments.

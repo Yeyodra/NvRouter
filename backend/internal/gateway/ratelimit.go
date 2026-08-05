@@ -93,6 +93,24 @@ func extractIP(r *http.Request) string {
 	return host
 }
 
+func clientIP(r *http.Request) string {
+	peer := net.ParseIP(extractIP(r))
+	if peer == nil {
+		return extractIP(r)
+	}
+	if !peer.IsLoopback() {
+		return peer.String()
+	}
+	values := r.Header.Values("X-Real-IP")
+	if len(values) != 1 {
+		return peer.String()
+	}
+	if ip := net.ParseIP(values[0]); ip != nil {
+		return ip.String()
+	}
+	return peer.String()
+}
+
 // loginRateLimiter creates a rate limiting middleware for the login endpoint.
 // Allows 5 attempts per minute per IP.
 func (s *Server) loginRateLimiter(next http.Handler) http.Handler {

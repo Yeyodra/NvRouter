@@ -133,14 +133,15 @@ type UsageRecord struct {
 	TenantID  string
 	ProjectID string
 	APIKeyID  string
+	ClientIP  string
 
 	Provider    string
 	Model       string
 	PublicModel string
 	AccountID   string
-	Client    string // detected calling tool (claude-code, codex, ...) or "unknown"
-	Status    string // success | cache_hit | blocked | failed | cancelled
-	ErrorKind string
+	Client      string // detected calling tool (claude-code, codex, ...) or "unknown"
+	Status      string // success | cache_hit | blocked | failed | cancelled
+	ErrorKind   string
 
 	PromptTokens     int
 	CompletionTokens int

@@ -437,6 +437,7 @@ func (s *Server) importN9routerConnections(ctx context.Context, doc map[string]j
 					continue
 				}
 				model := strings.TrimPrefix(key, "modelLock_")
+				model = connectors.EnterCanonicalModelID(model)
 				until := parseForeignLock(value)
 				if model == "" || until.IsZero() {
 					res.Errors = append(res.Errors, fmt.Sprintf("connection %s: invalid model lock %q", c.ID, key))

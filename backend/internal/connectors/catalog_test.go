@@ -26,6 +26,11 @@ func TestEnterConvergeCatalog(t *testing.T) {
 		t.Fatalf("Enter Converge models = %d, want 24", len(models))
 	}
 	for _, model := range models {
+		if strings.Contains(model.ID, "/") {
+			t.Fatalf("Enter canonical model must be bare, got %q", model.ID)
+		}
+	}
+	for _, model := range models {
 		if strings.Contains(model.ID, "claude-opus-4.8") || strings.Contains(model.ID, "claude-opus-4.7") || strings.Contains(model.ID, "claude-sonnet-5") || strings.Contains(model.ID, "claude-sonnet-4.6") || strings.HasPrefix(model.ID, "google/") {
 			t.Fatalf("JWT/project-chat model exposed: %q", model.ID)
 		}

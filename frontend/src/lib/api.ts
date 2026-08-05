@@ -1161,7 +1161,7 @@ export interface KeyUsageData {
     cost_usd: number;
   }[];
   models?: {
-    provider: string;
+    provider?: string;
     model: string;
     total_requests: number;
     prompt_tokens: number;
@@ -1169,12 +1169,25 @@ export interface KeyUsageData {
     cost_usd: number;
   }[];
   recent?: PortalRecentRequest[];
+  ip_activity?: {
+    total_requests: number;
+    total_tokens: number;
+    ips: {
+      ip: string;
+      requests: number;
+      tokens: number;
+      share_pct: number;
+      first_seen: string;
+      last_seen: string;
+    }[];
+  };
   days?: number;
 }
 
 export interface PortalRecentRequest {
   id: string;
-  provider: string;
+  client_ip: string;
+  provider?: string;
   model: string;
   prompt_tokens: number;
   completion_tokens: number;

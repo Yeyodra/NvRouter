@@ -110,17 +110,18 @@ func (m *Meter) Close(timeout time.Duration) {
 
 // Event captures the terminal accounting facts for one inbound request.
 type Event struct {
-	RequestID string
-	TenantID  string
-	ProjectID string
-	APIKeyID  string
+	RequestID   string
+	TenantID    string
+	ProjectID   string
+	APIKeyID    string
+	ClientIP    string
 	Provider    string
 	Model       string
 	PublicModel string
 	AccountID   string
-	Client    string
-	Status    string
-	ErrorKind string
+	Client      string
+	Status      string
+	ErrorKind   string
 
 	Usage           core.Usage
 	UsageSource     string // provider | estimated | cache | none
@@ -216,7 +217,7 @@ func (m *Meter) Record(ctx context.Context, ev Event) (int64, error) {
 	}
 	rec := store.UsageRecord{
 		ID: uuid.NewString(), RequestID: ev.RequestID,
-		TenantID: ev.TenantID, ProjectID: ev.ProjectID, APIKeyID: ev.APIKeyID,
+		TenantID: ev.TenantID, ProjectID: ev.ProjectID, APIKeyID: ev.APIKeyID, ClientIP: ev.ClientIP,
 		Provider: ev.Provider, Model: ev.Model, PublicModel: ev.PublicModel, AccountID: ev.AccountID, Client: ev.Client,
 		Status: status, ErrorKind: ev.ErrorKind, UsageSource: usageSource,
 		PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens,

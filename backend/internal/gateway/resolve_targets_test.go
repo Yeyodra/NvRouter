@@ -53,6 +53,16 @@ func TestResolveTargetsProviderModel(t *testing.T) {
 	}
 }
 
+func TestResolveTargetsCanonicalizesLegacyEnterModel(t *testing.T) {
+	res, err := resolveTargets(context.Background(), &fakeChains{}, &fakeAliases{}, nil, "t1", "enter-converge/openai/gpt-5.6-sol")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Targets) != 1 || res.Targets[0].Provider != "enter-converge" || res.Targets[0].Model != "gpt-5.6-sol" {
+		t.Fatalf("targets = %+v, want enter-converge/gpt-5.6-sol", res.Targets)
+	}
+}
+
 func TestResolveTargetsKeepsExtraSlashes(t *testing.T) {
 	// Vendor-namespaced model ids keep the remaining slashes in the model.
 	res, err := resolveTargets(context.Background(), &fakeChains{}, &fakeAliases{}, nil, "t1", "openrouter/anthropic/claude-3.5")

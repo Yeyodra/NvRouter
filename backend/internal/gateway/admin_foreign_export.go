@@ -3,6 +3,8 @@ package gateway
 import (
 	"net/http"
 	"time"
+
+	"github.com/mydisha/keirouter/backend/internal/connectors"
 )
 
 // exportN9routerEnter emits plaintext subscription accounts only after the caller explicitly selects
@@ -46,7 +48,7 @@ func (s *Server) exportN9routerEnter(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for model, until := range locks {
-			row["modelLock_"+model] = until.UTC().Format(time.RFC3339Nano)
+			row["modelLock_"+connectors.EnterNativeModelID(model)] = until.UTC().Format(time.RFC3339Nano)
 		}
 		out = append(out, row)
 	}

@@ -29,6 +29,29 @@ func TestExtractIPReturnsUnsplitPeerWhenPortIsMissing(t *testing.T) {
 	require.Equal(t, "127.0.0.1", extractIP(req))
 }
 
+func TestClientIPTrustsNormalizedHeaderOnlyFromLoopbackProxy(t *testing.T) {
+	proxied := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	proxied.RemoteAddr = "127.0.0.1:54321"
+	proxied.Header.Set("X-Real-IP", "203.0.113.10")
+	require.Equal(t, "203.0.113.10", clientIP(proxied))
+
+	direct := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	direct.RemoteAddr = "198.51.100.20:54321"
+	direct.Header.Set("X-Real-IP", "203.0.113.10")
+	require.Equal(t, "198.51.100.20", clientIP(direct))
+}
+
+func TestClientIPRejectsInvalidOrMultipleRealIPValues(t *testing.T) {
+	for _, values := range [][]string{{"not-an-ip"}, {"203.0.113.10", "203.0.113.11"}} {
+		req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		req.RemoteAddr = "127.0.0.1:54321"
+		for _, value := range values {
+			req.Header.Add("X-Real-IP", value)
+		}
+		require.Equal(t, "127.0.0.1", clientIP(req))
+	}
+}
+
 func TestLoginRateLimiterDelegatesLoopbackProxyLimitingToEdge(t *testing.T) {
 	s := &Server{}
 	calls := 0

@@ -1731,6 +1731,7 @@ func (p *Pipeline) recordOutcomeWithTTFT(ctx context.Context, meta core.RequestM
 		TenantID:        meta.TenantID,
 		ProjectID:       meta.ProjectID,
 		APIKeyID:        meta.APIKeyID,
+		ClientIP:        meta.ClientIP,
 		Provider:        attempt.Target.Provider,
 		Model:           attempt.Target.Model,
 		PublicModel:     meta.PublicModel,

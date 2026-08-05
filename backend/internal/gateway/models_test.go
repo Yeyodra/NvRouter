@@ -46,7 +46,10 @@ func TestListModelsUnrestrictedShowsOnlyPublicRoutes(t *testing.T) {
 	createPublicRoutes(t, db)
 
 	body := getAuthedJSON(t, gw, keys[0].Plaintext, "/v1/models")
-	require.ElementsMatch(t, []string{"fast", "safe", "resilient"}, modelIDsFromResponse(t, body))
+	models := modelIDsFromResponse(t, body)
+	for _, route := range []string{"fast", "safe", "resilient"} {
+		require.Contains(t, models, route)
+	}
 	assertPublicModelEntries(t, body)
 
 	encoded, err := json.Marshal(body)
@@ -54,6 +57,16 @@ func TestListModelsUnrestrictedShowsOnlyPublicRoutes(t *testing.T) {
 	require.NotContains(t, string(encoded), "openai")
 	require.NotContains(t, string(encoded), "anthropic")
 	require.NotContains(t, string(encoded), "internal-")
+}
+
+func TestEnterCanonicalMigrationRegistersBarePublicRoutes(t *testing.T) {
+	gw, _, keys := newPublicModelsTestGateway(t, "unrestricted")
+	body := getAuthedJSON(t, gw, keys[0].Plaintext, "/v1/models")
+	models := modelIDsFromResponse(t, body)
+	require.Contains(t, models, "gpt-5.6-sol")
+	require.Contains(t, models, "claude-opus-4.6")
+	require.NotContains(t, models, "openai/gpt-5.6-sol")
+	require.NotContains(t, models, "anthropic/claude-opus-4.6")
 }
 
 func TestListModelsByKindCannotBypassVisibility(t *testing.T) {

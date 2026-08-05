@@ -150,7 +150,7 @@ function SavingsCardContent({ data }: { data: SavingsCardData }) {
         >
           <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
             <img
-              src="/nvrouter-logo.svg"
+              src="/nvrouter-mark.svg"
               alt="NvRouter"
               style={{ width: 34, height: 34, objectFit: "contain" }}
               crossOrigin="anonymous"
@@ -511,7 +511,7 @@ export function SavingsCardShareButton({
         ) : (
           <>
             <img
-              src="/nvrouter-logo.svg"
+              src="/nvrouter-mark.svg"
               alt=""
               className="h-3.5 w-3.5 object-contain"
             />

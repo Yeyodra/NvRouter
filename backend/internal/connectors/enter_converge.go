@@ -23,6 +23,45 @@ const (
 	enterImageMax = 10 << 20
 )
 
+var enterNativeModels = map[string]string{
+	"gpt-5.6-sol": "openai/gpt-5.6-sol", "gpt-5.6-terra": "openai/gpt-5.6-terra", "gpt-5.6-luna": "openai/gpt-5.6-luna",
+	"gpt-5.5": "openai/gpt-5.5", "gpt-5.4-pro": "openai/gpt-5.4-pro", "gpt-5.4": "openai/gpt-5.4", "gpt-5.2-pro": "openai/gpt-5.2-pro",
+	"claude-opus-4.6": "anthropic/claude-opus-4.6", "claude-sonnet-4.5": "anthropic/claude-sonnet-4.5",
+	// Legacy lock-only IDs remain mapped for migration/import/export compatibility;
+	// they are intentionally absent from the active Enter catalog.
+	"claude-opus-4.8": "anthropic/claude-opus-4.8", "claude-sonnet-5": "anthropic/claude-sonnet-5",
+	"minimax-m3": "minimax/minimax-m3", "minimax-m2.7": "minimax/minimax-m2.7", "minimax-m2.5": "minimax/minimax-m2.5",
+	"deepseek-v4-pro": "deepseek/deepseek-v4-pro",
+	"qwen-3.7-plus":   "alibaba/qwen-3.7-plus", "qwen-3.7-max": "alibaba/qwen-3.7-max", "qwen-3.6-plus": "alibaba/qwen-3.6-plus", "qwen-3.6-max-preview": "alibaba/qwen-3.6-max-preview",
+	"kimi-k3": "moonshotai/kimi-k3", "kimi-k2.7-code": "moonshotai/kimi-k2.7-code", "kimi-k2.6": "moonshotai/kimi-k2.6", "kimi-k2.5": "moonshotai/kimi-k2.5",
+	"glm-5.2": "z-ai/glm-5.2", "glm-5.1": "z-ai/glm-5.1", "glm-5": "z-ai/glm-5",
+}
+
+// EnterNativeModelID converts NvRouter's canonical bare ID to Enter's wire ID.
+// Already-native IDs remain accepted for migration compatibility.
+func EnterNativeModelID(model string) string {
+	if native, ok := enterNativeModels[model]; ok {
+		return native
+	}
+	return model
+}
+
+var enterCanonicalModels = func() map[string]string {
+	out := make(map[string]string, len(enterNativeModels))
+	for canonical, native := range enterNativeModels {
+		out[native] = canonical
+	}
+	return out
+}()
+
+// EnterCanonicalModelID converts a known Enter wire ID to its NvRouter ID.
+func EnterCanonicalModelID(model string) string {
+	if canonical, ok := enterCanonicalModels[model]; ok {
+		return canonical
+	}
+	return model
+}
+
 type enterWorkspaceCacheEntry struct {
 	id      string
 	expires time.Time
@@ -161,6 +200,7 @@ func (c *EnterConverge) prepare(ctx context.Context, req *core.ChatRequest, cred
 		return nil, "", err
 	}
 	clone := cloneEnterRequest(req)
+	clone.Model = EnterNativeModelID(req.Model)
 	clone.Stream = stream
 	if err := c.prefetchImages(ctx, clone, creds); err != nil {
 		return nil, "", &core.ProviderError{Kind: core.ErrBadRequest, Scope: core.FailureScopeRequest, Provider: enterProvider, Model: req.Model, Message: err.Error(), Cause: err}
@@ -285,6 +325,9 @@ func (c *EnterConverge) Chat(ctx context.Context, req *core.ChatRequest, creds c
 		return nil, enterError(err, req.Model)
 	}
 	resp, err := c.codec.ParseResponse(response, req.Model)
+	if resp != nil {
+		resp.Model = req.Model
+	}
 	return resp, err
 }
 
@@ -348,7 +391,7 @@ func (c *EnterConverge) ListModels(ctx context.Context, creds core.Credentials) 
 	}
 	allowed := map[string]ModelSpec{}
 	for _, m := range ModelsForProvider(enterProvider) {
-		allowed[m.ID] = m
+		allowed[EnterNativeModelID(m.ID)] = m
 	}
 	seen := map[string]bool{}
 	var out []ModelSpec

@@ -56,7 +56,7 @@ function AuthGateLogo({ className }: { className?: string }) {
     staleTime: 5 * 60_000,
     retry: false,
   });
-  const src = data?.logo_url || "/nvrouter-logo.svg";
+  const src = data?.logo_url || "/nvrouter-mark.svg";
   return <img src={src} alt={data?.name || "NvRouter"} className={className} />;
 }
 

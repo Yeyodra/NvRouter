@@ -21,7 +21,7 @@ interface BrandingContextValue {
 
 const BrandingContext = createContext<BrandingContextValue>({
   branding: DEFAULT_BRANDING,
-  logoSrc: "/nvrouter-logo.svg",
+  logoSrc: "/nvrouter-mark.svg",
   faviconSrc: "/nvrouter-favicon.svg",
   isLoading: false,
 });
@@ -38,7 +38,7 @@ export function AdminBrandingProvider({ children }: { children: ReactNode }) {
   });
 
   const branding = data ?? DEFAULT_BRANDING;
-  const logoSrc = branding.logo_url || "/nvrouter-logo.svg";
+  const logoSrc = branding.logo_url || "/nvrouter-mark.svg";
   const faviconSrc = branding.favicon_url || "/nvrouter-favicon.svg";
 
   // Update document title, favicon, and color palette dynamically
@@ -82,7 +82,7 @@ export function PortalBrandingProvider({ children }: { children: ReactNode }) {
   });
 
   const branding = data ?? DEFAULT_BRANDING;
-  const logoSrc = branding.logo_url || "/nvrouter-logo.svg";
+  const logoSrc = branding.logo_url || "/nvrouter-mark.svg";
   const faviconSrc = branding.favicon_url || "/nvrouter-favicon.svg";
 
   useEffect(() => {
