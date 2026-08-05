@@ -407,11 +407,10 @@ function ProfileMenu() {
         className="flex h-11 items-center gap-2.5 rounded-xl px-2 transition-colors hover:bg-ink-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-400/60 dark:hover:bg-ink-800"
       >
         <div className="flex h-8 w-8 items-center justify-center rounded-full bg-accent-600 text-xs font-semibold text-white">
-          K
+          N
         </div>
         <div className="hidden text-left sm:block">
-          <p className="text-sm font-medium leading-tight">Kei</p>
-          <p className="text-xs leading-tight text-[var(--text-muted)]">AI Bender</p>
+          <p className="text-sm font-medium leading-tight">Novella</p>
         </div>
         <ChevronDown className="h-4 w-4 text-[var(--text-muted)]" />
       </button>
@@ -422,8 +421,7 @@ function ProfileMenu() {
           className="absolute right-0 top-full z-50 mt-2 w-48 overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--bg-elevated)] py-1 shadow-[var(--shadow-float)]"
         >
           <div className="px-4 py-3">
-            <p className="text-sm font-medium">Kei</p>
-            <p className="text-xs text-[var(--text-muted)]">AI Bender</p>
+            <p className="text-sm font-medium">Novella</p>
           </div>
           <div className="my-1 h-px bg-[var(--border)]" />
           
