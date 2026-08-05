@@ -261,17 +261,28 @@ function RouteProgress() {
 
 function SidebarContent({ onNavigate }: { onNavigate: () => void }) {
   const { branding, logoSrc } = useBranding();
+  const label = branding.name || "NvRouter";
   return (
     <aside className="flex h-full w-60 shrink-0 flex-col border-r border-[var(--border)] bg-[var(--bg-elevated)]">
-      <div className="flex items-center justify-between px-5 py-5">
-        <img src={logoSrc} alt={branding.name || "NvRouter"} className="h-14 w-full object-contain object-left" />
-        {/* Close button — only visible on mobile when rendered inside the drawer. */}
+      <div className="flex min-h-20 items-center gap-3 px-4 py-3">
+        <div className="min-w-0 flex-1">
+          {branding.logo_url ? (
+            <img src={logoSrc} alt={label} className="h-12 w-full object-contain object-left" />
+          ) : (
+            <>
+              <img src="/nvrouter-logo.svg" alt={label} className="h-12 w-full object-contain object-left dark:hidden" />
+              <img src="/nvrouter-logo-dark.svg" alt={label} className="hidden h-12 w-full object-contain object-left dark:block" />
+            </>
+          )}
+        </div>
+        {/* Close button — mobile counterpart to the top-bar menu trigger. */}
         <button
+          type="button"
           onClick={onNavigate}
           aria-label="Close navigation"
-          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[var(--text-muted)] transition-colors hover:bg-ink-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-400/60 dark:hover:bg-ink-800 lg:hidden"
+          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-[var(--border)] bg-[var(--bg-subtle)] text-[var(--text-muted)] shadow-sm transition-[transform,background-color,border-color,color] hover:border-[var(--border-strong)] hover:text-[var(--text)] active:scale-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-400/60 lg:hidden"
         >
-          <X className="h-5 w-5" />
+          <X className="h-5 w-5" strokeWidth={2} />
         </button>
       </div>
 
