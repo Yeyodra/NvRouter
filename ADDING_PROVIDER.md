@@ -1,6 +1,35 @@
-# Adding a Provider to KeiRouter
+# Adding a Provider to NvRouter
 
 This is the source of truth for coding agents and contributors adding or extending a provider. Explore the current code before editing: this guide defines the boundaries and completion criteria, while existing providers show the latest concrete APIs.
+
+NvRouter is the public product name. Internal Go module/package names, service names, configuration keys, data paths, migrations, and compatibility identifiers may still use KeiRouter. Do not mass-rename those internals while adding a provider. All new customer-visible branding and metadata must use `NvRouter` or `nvrouter`.
+
+## Public API identity and privacy boundary
+
+Provider integration has two deliberately separate identities:
+
+```text
+customer-requested public route
+        → API-key authorization
+        → alias/chain/provider resolution and fallback
+        → internal provider/model/account attempt
+```
+
+- Authorize the inbound public model/route before resolving it. A restricted key must receive `403` without invoking the connector, including Chat, Responses, Messages token counting, Gemini URL-model routing, and applicable capability endpoints.
+- Preserve the requested public route for the full request lifetime. Every customer-visible protocol model field must use that route even when an alias, chain, fallback, or cache hit resolves to a different provider/model/account.
+- Keep actual provider/model/account identity for dispatch, pricing, cooldowns, health, admin Usage/Insights, internal logs, and support. Customer privacy is a projection, not destruction of internal telemetry.
+- Never expose provider IDs, internal model targets, account/workspace/project IDs, upstream endpoints or bodies, fallback chains, or routing metadata through public bodies, streams, errors, or headers.
+- Do not emit or reintroduce `X-KeiRouter-Provider`, `X-KeiRouter-Model`, or `X-KeiRouter-Account`, and do not replace them with provider-equivalent `X-NvRouter-*` headers. Neutral cache/status headers are allowed only when they contain no routing identity.
+- Public errors must be stable and provider-neutral. Keep raw upstream detail in structured internal errors/logs only; preserving a neutral `Retry-After` is allowed.
+
+Public model discovery is not the admin provider catalog:
+
+- `/api/providers/{id}/models` is an admin/internal catalog surface.
+- Authenticated `/v1/models` is scoped to the API key's public routes, uses `owned_by: "nvrouter"`, and exposes no provider metadata.
+- `/v1/models/{kind}` must enforce the same visibility policy, and metadata/info endpoints must not become an introspection bypass.
+- Registering a provider or curated upstream model does not automatically make its provider-qualified ID public.
+
+Customer usage follows the same split. New metered chat requests persist the inbound `public_model`; customer self-service and portal views group by it and label historical missing values `legacy`, never by falling back to internal provider/model. Admin telemetry continues to retain actual provider/model/account dimensions.
 
 ## 1. Decide whether code needs to exist
 
@@ -121,7 +150,7 @@ type Connector interface {
 }
 ```
 
-Prefer reusing codecs and HTTP/SSE helpers over reimplementing translation/parsing. Implement `DirectStreamable` only when raw same-dialect SSE is valid and no downstream normalization is required.
+Prefer reusing codecs and HTTP/SSE helpers over reimplementing translation/parsing. Implement `DirectStreamable` only for same-dialect streams whose framing can be safely inspected and projected by the gateway. "Direct" does not mean byte-for-byte public passthrough: the gateway still owns public model identity, error sanitization, terminal validation, and privacy enforcement.
 
 Connectors are shared across concurrent requests: caches and mutable state require synchronization and bounds. Never retain credentials beyond the minimum required behavior; never log them.
 
@@ -154,6 +183,9 @@ Proxy support is not automatic outside inference dispatch. For validation, model
 - Respect context cancellation and configured timeouts.
 - SSE must emit canonical text/thinking/tool/usage/finish chunks and terminate cleanly.
 - Preserve fragmented tool-call arguments.
+- Treat malformed frames, truncated frames, and streams that close without a terminal event as response-integrity failures. Emit one sanitized, dialect-compatible terminal error so clients do not see an unexplained successful EOF.
+- Sanitize both stream-start and late/mid-stream provider failures. Raw upstream error text remains available to internal logs but must not reach public event payloads.
+- Project only protocol-defined response identity fields (for example OpenAI top-level `model`, Responses `response.model`, Anthropic `message_start.message.model`, and Gemini `modelVersion`). Never recursively rewrite arbitrary nested keys named `model`; tool arguments and provider payload data must remain byte-semantically intact.
 - Retry only replay-safe requests. For streaming, retry only before response headers/body delivery begins; never replay after a chunk may have reached the client.
 - Async create-job media endpoints must not be blindly retried because duplicate jobs cost money.
 
@@ -180,6 +212,8 @@ Examples:
 Do not disable or park an account for a model-only failure. A success on one model must not clear a sibling model's lock. Verify behavior through dispatcher storage/selection tests, not only connector error fields.
 
 Keep 5xx/provider outages out of permanent account state. Preserve upstream `Retry-After` where applicable.
+
+`ProviderError` may retain internal provider/model/status/cause fields for routing and observability. Public rendering must pass through the gateway sanitizer and must not expose raw response bodies, endpoint URLs, provider/account/workspace names, stack traces, or filesystem paths.
 
 ## 9. Optional capabilities
 
@@ -242,6 +276,25 @@ Use `httptest.Server`; do not hit the live provider in unit tests. Cover:
 - catalog GET never calls live discovery (leave a counting/hanging-source regression test);
 - global model Test uses exact provider/model and same-provider pool semantics;
 - account metadata survives vault/import/export round trips.
+- a requested public route can resolve/fallback to an internal target while unary and streamed model identity remains the requested route;
+- forbidden public routes return `403` before connector execution;
+- direct and parsed streams sanitize start/late errors and malformed/truncated/missing-terminal failures;
+- protocol model projection does not mutate a nested tool argument such as `{"model":"customer-selected-value"}`;
+- public responses and CORS exposure contain none of the forbidden routing headers;
+- customer usage/portal output contains only `public_model`/`legacy`, while an actual persisted usage row and admin telemetry retain internal provider/model/account.
+
+Use explicit canaries for privacy tests rather than real provider names:
+
+```text
+public route: public-safe-route
+provider: internal-provider-canary
+model: internal-model-canary
+account: internal-account-canary
+workspace: internal-workspace-canary
+endpoint: https://internal-upstream-canary.invalid
+```
+
+Scan response status, every header, raw unary body, every SSE/NDJSON event, terminal errors, and decoded nested strings. A provider is not privacy-complete when only its happy-path unary response passes.
 
 ### Frontend
 
@@ -291,6 +344,11 @@ A provider is not complete when it merely compiles. It is complete when the rele
 - Treating all 402/429 responses as account-wide exhaustion.
 - Running live model discovery while rendering the model catalog.
 - Replaying a stream after delivery began.
+- Returning the resolved internal model/provider/account to a public client instead of preserving the requested route.
+- Reintroducing routing identity through response headers, CORS exposure, raw upstream errors, or provider-equivalent renamed headers.
+- Recursively rewriting every JSON key named `model` and silently corrupting tool-call arguments.
+- Treating provider registration or curated models as automatic public-route publication.
+- Removing internal provider/account telemetry instead of projecting a privacy-safe customer view.
 - Decoding exact numeric IDs through `float64`.
 - Ignoring proxies in helper endpoints.
 - Logging credentials or raw sensitive upstream bodies.
