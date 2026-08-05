@@ -18,11 +18,11 @@ import (
 )
 
 // Grok CLI (Grok Build) client fingerprint.
-// ponytail: pin 0.2.99 until official CLI bumps; upgrade constants + UA together.
+// Keep in sync with xai-org/grok-build xai-grok-version.
 const (
-	grokCLIVersion    = "0.2.99"
+	grokCLIVersion    = "0.2.120"
 	grokCLIIdentifier = "grok-shell"
-	grokCLIUserAgent  = "grok-shell/0.2.99 (linux; x86_64)"
+	grokCLIUserAgent  = "grok-shell/0.2.120 (linux; x86_64)"
 	grokCLITokenAuth  = "xai-grok-cli"
 )
 
@@ -106,7 +106,7 @@ func (c *GrokCLI) chatHeaders(creds core.Credentials, model string, req *core.Ch
 		h["x-email"] = email
 	}
 	if userID := firstNonEmpty(creds.Extra["userId"], creds.Extra["userid"], creds.Extra["user_id"]); userID != "" {
-		h["x-userid"] = userID
+		h["x-grok-user-id"] = userID
 	}
 	return mergeHeaders(h, creds.Headers)
 }
@@ -131,7 +131,7 @@ func (c *GrokCLI) validateHeaders(creds core.Credentials) map[string]string {
 		h["x-email"] = email
 	}
 	if userID := firstNonEmpty(creds.Extra["userId"], creds.Extra["userid"], creds.Extra["user_id"]); userID != "" {
-		h["x-userid"] = userID
+		h["x-grok-user-id"] = userID
 	}
 	return mergeHeaders(h, creds.Headers)
 }

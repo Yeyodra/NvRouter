@@ -6,8 +6,45 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/mydisha/keirouter/backend/internal/core"
 )
+
+func TestResponsesToolChoiceRoundTrip(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		choice string
+		want   any
+	}{
+		{"preset", `"required"`, "required"},
+		{"flat function", `{"type":"function","name":"calculator"}`, map[string]any{"type": "function", "name": "calculator"}},
+		{"nested chat function", `{"type":"function","function":{"name":"calculator"}}`, map[string]any{"type": "function", "name": "calculator"}},
+		{"malformed conflicting type", `{"type":"none","function":{"name":"calculator"}}`, map[string]any{"type": "none", "function": map[string]any{"name": "calculator"}}},
+		{"malformed missing type", `{"function":{"name":"calculator"}}`, map[string]any{"function": map[string]any{"name": "calculator"}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(`{"model":"grok-4.5","input":"add","tools":[{"type":"function","name":"calculator","parameters":{"type":"object"}}],"tool_choice":` + tt.choice + `}`)
+			req, err := (OpenAIResponsesCodec{}).ParseRequest(body)
+			require.NoError(t, err)
+			rendered, err := (OpenAIResponsesCodec{}).RenderRequest(req)
+			require.NoError(t, err)
+			var got map[string]any
+			require.NoError(t, json.Unmarshal(rendered, &got))
+			require.Equal(t, tt.want, got["tool_choice"])
+		})
+	}
+}
+
+func TestResponsesDropsToolChoiceWithoutTools(t *testing.T) {
+	req, err := (OpenAIResponsesCodec{}).ParseRequest([]byte(`{"model":"grok-4.5","input":"answer","tool_choice":"required"}`))
+	require.NoError(t, err)
+	rendered, err := (OpenAIResponsesCodec{}).RenderRequest(req)
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(rendered, &got))
+	require.NotContains(t, got, "tool_choice")
+}
 
 func TestResponsesParseDoneToolUpdatesAreComplete(t *testing.T) {
 	parser := OpenAIResponsesCodec{}.NewStreamParser()

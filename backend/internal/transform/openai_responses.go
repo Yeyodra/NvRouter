@@ -58,6 +58,7 @@ type respRequest struct {
 	Reasoning *struct {
 		Effort string `json:"effort,omitempty"`
 	} `json:"reasoning,omitempty"`
+	ToolChoice any `json:"tool_choice,omitempty"`
 }
 
 // responsesAPIAllowlist enumerates the fields that the Responses API (/v1/responses)
@@ -127,7 +128,7 @@ func (OpenAIResponsesCodec) ParseRequest(body []byte) (*core.ChatRequest, error)
 		return nil, fmt.Errorf("openai-responses: parse request: %w", err)
 	}
 
-	req := &core.ChatRequest{Model: raw.Model, Stream: raw.Stream, System: raw.Instructions}
+	req := &core.ChatRequest{Model: raw.Model, Stream: raw.Stream, System: raw.Instructions, ToolChoice: raw.ToolChoice}
 	req.Temperature = raw.Temperature
 	req.MaxTokens = raw.MaxTokens
 	req.TopP = raw.TopP
@@ -519,6 +520,9 @@ func (c OpenAIResponsesCodec) RenderRequest(req *core.ChatRequest) ([]byte, erro
 		}
 		out["tools"] = tools
 	}
+	if len(req.Tools) > 0 && req.ToolChoice != nil {
+		out["tool_choice"] = responsesToolChoice(req.ToolChoice)
+	}
 
 	// Allowlist filter: strip any field not recognized by the Responses API.
 	// This prevents Chat Completions parameters or client-specific fields from
@@ -530,6 +534,22 @@ func (c OpenAIResponsesCodec) RenderRequest(req *core.ChatRequest) ([]byte, erro
 	}
 
 	return json.Marshal(out)
+}
+
+func responsesToolChoice(choice any) any {
+	m, ok := choice.(map[string]any)
+	if !ok || m["type"] != "function" {
+		return choice
+	}
+	fn, ok := m["function"].(map[string]any)
+	if !ok {
+		return choice
+	}
+	name, _ := fn["name"].(string)
+	if name == "" {
+		return choice
+	}
+	return map[string]any{"type": "function", "name": name}
 }
 
 // splitResponsesEffortModel peels a trailing effort suffix off a synthetic

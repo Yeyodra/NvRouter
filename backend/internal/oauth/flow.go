@@ -676,10 +676,10 @@ func (c ProviderConfig) FetchUserInfo(ctx context.Context, t *Tokens) {
 }
 
 // Grok CLI probe fingerprint (mirrors connectors/grok_cli validate headers).
-// ponytail: pin with connector constants; bump together when CLI version changes.
+// Keep in sync with xai-org/grok-build xai-grok-version.
 const (
-	grokCLIUserAgent  = "grok-shell/0.2.99 (linux; x86_64)"
-	grokCLIVersion    = "0.2.99"
+	grokCLIUserAgent  = "grok-shell/0.2.120 (linux; x86_64)"
+	grokCLIVersion    = "0.2.120"
 	grokCLIIdentifier = "grok-shell"
 	grokCLITokenAuth  = "xai-grok-cli"
 )

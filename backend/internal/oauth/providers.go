@@ -215,7 +215,7 @@ var configs = map[string]ProviderConfig{
 			"conversations:read", "conversations:write",
 		},
 		ExtraDeviceParams: map[string]string{"referrer": "grok-build"},
-		UserAgent:         "grok-shell/0.2.99 (linux; x86_64)",
+		UserAgent:         "grok-shell/0.2.120 (linux; x86_64)",
 		RefreshLead:       10 * time.Minute,
 	},
 	"cline": {

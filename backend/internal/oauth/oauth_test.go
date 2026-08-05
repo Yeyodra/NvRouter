@@ -81,7 +81,7 @@ func TestGrokCLIConfigShape(t *testing.T) {
 	if cfg.ExtraDeviceParams["referrer"] != "grok-build" {
 		t.Fatalf("grok-cli ExtraDeviceParams referrer: got %#v", cfg.ExtraDeviceParams)
 	}
-	if cfg.UserAgent != "grok-shell/0.2.99 (linux; x86_64)" {
+	if cfg.UserAgent != "grok-shell/0.2.120 (linux; x86_64)" {
 		t.Fatalf("grok-cli UserAgent: got %q", cfg.UserAgent)
 	}
 	if cfg.RefreshLead != 10*time.Minute {
@@ -368,9 +368,9 @@ func TestRequestDeviceCodeExtraDeviceParams(t *testing.T) {
 	defer srv.Close()
 
 	cfg := ProviderConfig{
-		ClientID:        "client-1",
-		DeviceCodeURL:   srv.URL,
-		Scopes:          []string{"api:access"},
+		ClientID:          "client-1",
+		DeviceCodeURL:     srv.URL,
+		Scopes:            []string{"api:access"},
 		ExtraDeviceParams: map[string]string{"referrer": "grok-build"},
 	}
 	dc, err := cfg.RequestDeviceCode(context.Background(), "")

@@ -68,7 +68,8 @@ func TestGrokCLI_ChatHeaders_NoTokenAuth(t *testing.T) {
 	require.Equal(t, grokCLIVersion, h["x-grok-client-version"])
 	require.Equal(t, "grok-4.5", h["x-grok-model-override"])
 	require.Equal(t, "u@example.com", h["x-email"])
-	require.Equal(t, "user-1", h["x-userid"])
+	require.Equal(t, "user-1", h["x-grok-user-id"])
+	require.NotContains(t, h, "x-userid")
 	require.NotEmpty(t, h["x-grok-session-id"])
 	require.Equal(t, h["x-grok-session-id"], h["x-grok-conv-id"])
 	require.NotEmpty(t, h["x-grok-req-id"])
@@ -537,6 +538,48 @@ func TestGrokCLI_RenderBody_CrossProviderToolHistory(t *testing.T) {
 	require.Equal(t, map[string]any{
 		"type": "object", "properties": map[string]any{"input": map[string]any{"type": "string"}}, "required": []any{"input"},
 	}, tool["parameters"])
+}
+
+func TestGrokCLI_RenderBody_PreservesForcedToolChoice(t *testing.T) {
+	c := NewGrokCLI("grok-cli", "https://cli-chat-proxy.grok.com/v1")
+	req := &core.ChatRequest{
+		Model:      "grok-4.5",
+		Messages:   []core.Message{{Role: core.RoleUser, Content: []core.ContentPart{{Type: core.PartText, Text: "add"}}}},
+		Tools:      []core.Tool{{Name: "calculator", Parameters: json.RawMessage(`{"type":"object"}`)}},
+		ToolChoice: map[string]any{"type": "function", "function": map[string]any{"name": "calculator"}},
+	}
+	body, _, err := c.renderBody(req)
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(body, &got))
+	require.Equal(t, map[string]any{"type": "function", "name": "calculator"}, got["tool_choice"])
+}
+
+func TestGrokCLI_StreamPreservesToolIdentityAcrossEvents(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, event := range []string{
+			`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"calculator"}}`,
+			`{"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_1","delta":"{\"a\":19"}`,
+			`{"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_1","delta":",\"b\":23}"}`,
+			`{"type":"response.function_call_arguments.done","output_index":0,"item_id":"fc_1","arguments":"{\"a\":19,\"b\":23}"}`,
+			`{"type":"response.completed","response":{"status":"completed"}}`,
+		} {
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", event)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewGrokCLI("grok-cli", srv.URL)
+	resp, err := c.Chat(context.Background(), &core.ChatRequest{Model: "grok-4.5", Messages: []core.Message{{Role: core.RoleUser}}}, core.Credentials{AccessToken: "tok"})
+	require.NoError(t, err)
+	require.Equal(t, core.FinishToolCalls, resp.FinishReason)
+	require.Len(t, resp.Message.Content, 1)
+	call := resp.Message.Content[0].ToolCall
+	require.NotNil(t, call)
+	require.Equal(t, "call_1", call.ID)
+	require.Equal(t, "calculator", call.Name)
+	require.JSONEq(t, `{"a":19,"b":23}`, string(call.Arguments))
 }
 
 func TestGrokCLI_StreamFailsClosedWithoutTerminalEvent(t *testing.T) {
