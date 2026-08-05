@@ -66,6 +66,12 @@ export function KeyPortalPage() {
   });
 
   useEffect(() => {
+    if (activeKey && data?.key_id) {
+      setParams({ id: data.key_id }, { replace: true });
+    }
+  }, [activeKey, data?.key_id, setParams]);
+
+  useEffect(() => {
     if (data?.allowed_models?.length && !selectedModel) {
       setSelectedModel(data.allowed_models[0]);
     }
