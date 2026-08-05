@@ -66,7 +66,9 @@ export function QuotaPage() {
   const quota = useQuery({
     queryKey: ["quota", period],
     queryFn: () => api.quota(period),
-    refetchInterval: autoRefresh ? REFRESH_INTERVAL : false,
+    refetchInterval: (query) => autoRefresh || query.state.data?.accounts.some((account) =>
+      account.quota_state === "queued" || account.quota_state === "refreshing"
+    ) ? REFRESH_INTERVAL : false,
     placeholderData: (previous) => previous,
   });
 
@@ -619,11 +621,12 @@ function QuotaAccountRow({
     mutationFn: () => api.accountQuota(account.id),
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["quota"] });
-      if (result.supported) toast.success("Quota refreshed", "The latest upstream limits are now available.");
-      else toast.success("Usage-only account", "This provider does not expose upstream quota through KeiRouter.");
+      toast.success(result.accepted ? "Quota queued" : "Refresh already queued", "The latest state will appear automatically.");
     },
     onError: (error: Error) => toast.error("Quota refresh failed", error.message),
   });
+  const refreshLabel = quotaRefreshLabel(state, refreshQuota.isPending);
+  const refreshBusy = refreshQuota.isPending || state === "queued" || state === "refreshing";
 
   return (
     <>
@@ -669,12 +672,13 @@ function QuotaAccountRow({
               <button
                 type="button"
                 onClick={() => refreshQuota.mutate()}
-                disabled={refreshQuota.isPending || account.status === "paused"}
-                aria-label={`Refresh quota for ${account.label || account.provider_name}`}
-                title={account.status === "paused" ? "Enable the account before refreshing quota" : "Refresh upstream quota"}
-                className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-[var(--text-muted)] hover:bg-[var(--bg-subtle)] hover:text-[var(--text)] disabled:cursor-not-allowed disabled:opacity-35"
+                disabled={refreshBusy || account.status === "paused"}
+                aria-label={`${refreshLabel} for ${account.label || account.provider_name}`}
+                title={account.status === "paused" ? "Enable the account before refreshing quota" : refreshLabel}
+                className="inline-flex h-8 items-center gap-1.5 rounded-lg px-2 text-[10px] font-medium text-[var(--text-muted)] hover:bg-[var(--bg-subtle)] hover:text-[var(--text)] disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {refreshQuota.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                {refreshBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                {refreshLabel}
               </button>
             )}
             <button
@@ -696,7 +700,7 @@ function QuotaAccountRow({
               <Trash2 className="h-3.5 w-3.5" />
             </button>
           </div>
-          {state === "error" && <span className="sr-only">Quota refresh error</span>}
+          <span className="sr-only" role="status" aria-live="polite">{refreshBusy ? `${refreshLabel} for ${account.label || account.provider_name}` : state === "error" ? "Quota refresh error" : ""}</span>
         </td>
       </tr>
       {expanded && quotas.length > 0 && (
@@ -731,15 +735,17 @@ function QuotaAccountMobile({
   const toast = useToast();
   const status = statusMeta[account.status] ?? { label: account.status, tone: "neutral" as const };
   const canReportQuota = supportsQuota(account);
+  const state = effectiveQuotaState(account);
   const refreshQuota = useMutation({
     mutationFn: () => api.accountQuota(account.id),
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["quota"] });
-      if (result.supported) toast.success("Quota refreshed", "The latest upstream limits are now available.");
-      else toast.success("Usage-only account", "This provider does not expose upstream quota through KeiRouter.");
+      toast.success(result.accepted ? "Quota queued" : "Refresh already queued", "The latest state will appear automatically.");
     },
     onError: (error: Error) => toast.error("Quota refresh failed", error.message),
   });
+  const refreshLabel = quotaRefreshLabel(state, refreshQuota.isPending);
+  const refreshBusy = refreshQuota.isPending || state === "queued" || state === "refreshing";
 
   return (
     <article className={`px-4 py-4 ${account.status === "paused" ? "opacity-65" : ""}`}>
@@ -786,11 +792,12 @@ function QuotaAccountMobile({
           <button
             type="button"
             onClick={() => refreshQuota.mutate()}
-            disabled={refreshQuota.isPending || account.status === "paused"}
-            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[var(--border)] px-2.5 text-[10px] font-medium text-[var(--text-muted)] hover:bg-[var(--bg-subtle)] hover:text-[var(--text)] disabled:opacity-35"
+            disabled={refreshBusy || account.status === "paused"}
+            aria-label={`${refreshLabel} for ${account.label || account.provider_name}`}
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[var(--border)] px-2.5 text-[10px] font-medium text-[var(--text-muted)] hover:bg-[var(--bg-subtle)] hover:text-[var(--text)] disabled:opacity-50"
           >
-            {refreshQuota.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-            Refresh quota
+            {refreshBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+            {refreshLabel}
           </button>
         )}
         <button type="button" onClick={onToggle} className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[var(--border)] px-2.5 text-[10px] font-medium text-[var(--text-muted)] hover:bg-[var(--bg-subtle)] hover:text-[var(--text)]">
@@ -801,6 +808,7 @@ function QuotaAccountMobile({
           <Trash2 className="h-3.5 w-3.5" /> Delete
         </button>
       </div>
+      <span className="sr-only" role="status" aria-live="polite">{refreshBusy ? `${refreshLabel} for ${account.label || account.provider_name}` : state === "error" ? "Quota refresh error" : ""}</span>
 
       {expanded && hasReportedQuota(account) && (
         <div className="mt-4">
@@ -822,23 +830,38 @@ function QuotaVisibilityCell({ account, expanded, onExpand }: { account: QuotaAc
         detail: "Provider does not expose upstream limits.",
         tone: "bg-[var(--text-muted)]",
       },
+      unsupported: {
+        label: "Unavailable",
+        detail: "Provider does not expose upstream limits.",
+        tone: "bg-[var(--text-muted)]",
+      },
       paused: {
         label: "Quota refresh paused",
         detail: "Enable the account to fetch limits.",
         tone: "bg-[var(--text-muted)]",
       },
+      queued: {
+        label: "Queued",
+        detail: "Waiting for a refresh worker.",
+        tone: "bg-accent-500",
+      },
+      refreshing: {
+        label: "Refreshing",
+        detail: "Fetching upstream limits now.",
+        tone: "bg-accent-500",
+      },
       error: {
         label: "Refresh failed",
-        detail: account.message || "Retry the upstream quota request.",
+        detail: account.last_error || account.message || "Retry the upstream quota request.",
         tone: "bg-red-500",
       },
       pending: {
-        label: "Not yet reported",
+        label: "Never fetched",
         detail: "The provider supports upstream limits.",
         tone: "bg-amber-500",
       },
       unavailable: {
-        label: "Not reported",
+        label: "Never fetched",
         detail: account.message || "The provider returned no limit buckets.",
         tone: "bg-amber-500",
       },
@@ -876,7 +899,7 @@ function QuotaVisibilityCell({ account, expanded, onExpand }: { account: QuotaAc
         <div className={`h-full rounded-full ${color.bar}`} style={{ width: `${Math.max(2, 100 - remaining)}%` }} />
       </div>
       <div className="mt-1 text-[10px] text-[var(--text-muted)]">
-        {resetAt ? `Next reset ${formatCountdown(resetAt)}` : "No reset time reported"}
+        {quotaSnapshotLabel(account, state)} · {resetAt ? `Next reset ${formatCountdown(resetAt)}` : "No reset time reported"}
       </div>
     </div>
   );
@@ -895,7 +918,7 @@ function QuotaDetails({ account }: { account: QuotaAccount }) {
             {account.message || "Values are fetched directly from the provider and may use provider-specific units."}
           </p>
         </div>
-        <span className="text-[10px] text-[var(--text-muted)]">Account updated {relativeTime(account.updated_at)}</span>
+        <span className="text-[10px] text-[var(--text-muted)]">{account.fetched_at ? `Fetched ${relativeTime(account.fetched_at)}` : "Never fetched"}</span>
       </div>
       <div className="divide-y divide-[var(--border)] sm:hidden">
         {paged.map((quota, index) => <QuotaDetailMobile key={`${quota.resource_type}-${index}`} quota={quota} />)}
@@ -997,11 +1020,27 @@ function hasReportedQuota(account: QuotaAccount): boolean {
 }
 
 function effectiveQuotaState(account: QuotaAccount): string {
-  if (hasReportedQuota(account)) return "reported";
   if (account.quota_state) return account.quota_state;
+  if (hasReportedQuota(account)) return "reported";
   if (!supportsQuota(account)) return "usage_only";
   if (account.status === "paused") return "paused";
-  return "unavailable";
+  return "pending";
+}
+
+function quotaRefreshLabel(state: string, queueing: boolean): string {
+  if (queueing) return "Queueing";
+  if (state === "queued") return "Queued";
+  if (state === "refreshing") return "Refreshing";
+  return "Refresh quota";
+}
+
+function quotaSnapshotLabel(account: QuotaAccount, state: string): string {
+  const fetched = account.fetched_at ? relativeTime(account.fetched_at) : "never";
+  if (state === "stale") return `Stale cached · Fetched ${fetched}`;
+  if (state === "queued") return `Queued · Cached ${fetched}`;
+  if (state === "refreshing") return `Refreshing · Cached ${fetched}`;
+  if (state === "error") return `Refresh failed · Cached ${fetched}`;
+  return account.fetched_at ? `Fetched ${fetched}` : "Never fetched";
 }
 
 function isDepleted(account: QuotaAccount): boolean {

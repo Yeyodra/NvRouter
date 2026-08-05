@@ -6,6 +6,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -90,6 +91,7 @@ type Server struct {
 	healthChecker       *healthcheck.Checker
 	providerHealth      *health.Service
 	probeRunner         *health.ProbeRunner
+	quotaScheduler      *quotaScheduler
 	router              chi.Router
 }
 
@@ -206,6 +208,9 @@ func New(d Deps) *Server {
 		providerHealth:      d.ProviderHealth,
 		probeRunner:         d.ProbeRunner,
 	}
+	if d.DB != nil && d.Accounts != nil {
+		s.quotaScheduler = newQuotaScheduler(d.DB.QuotaSnapshots(), d.Accounts, s.fetchAccountQuota)
+	}
 	s.router = s.routes()
 	startSystemCollector(d.Resources)
 	return s
@@ -213,6 +218,51 @@ func New(d Deps) *Server {
 
 // Handler returns the root HTTP handler.
 func (s *Server) Handler() http.Handler { return s.router }
+
+// RunQuotaScheduler refreshes persisted quota snapshots until ctx is cancelled.
+func (s *Server) RunQuotaScheduler(ctx context.Context) {
+	if s.quotaScheduler != nil {
+		s.quotaScheduler.runLoop(ctx)
+	}
+}
+
+func (s *Server) fetchAccountQuota(ctx context.Context, account store.Account) (quotaPayload, error) {
+	source := connectors.GetQuotaSource(account.Provider)
+	if source == nil {
+		return quotaPayload{}, errQuotaUnsupported
+	}
+	if s.refresher != nil {
+		if refreshed, err := s.refresher.EnsureFresh(ctx, account); err == nil {
+			account = refreshed
+		}
+	}
+	if s.vault == nil {
+		return quotaPayload{}, errors.New("vault not configured")
+	}
+	creds, err := s.vault.Open(account)
+	if err != nil {
+		return quotaPayload{}, err
+	}
+	result, err := source.FetchQuota(ctx, creds)
+	if err != nil {
+		return quotaPayload{}, err
+	}
+	if result == nil {
+		return quotaPayload{}, errors.New("upstream quota returned no result")
+	}
+	payload := quotaPayload{PlanName: result.PlanName, Message: result.Message, UpstreamQuotas: result.Quotas}
+	for _, quota := range result.Quotas {
+		if quota.Limit <= 0 {
+			continue
+		}
+		ratio := float64(quota.Remaining) / float64(quota.Limit)
+		if !payload.HasRemainingRatio || ratio < payload.RemainingRatio {
+			payload.RemainingRatio = ratio
+			payload.HasRemainingRatio = true
+		}
+	}
+	return payload, nil
+}
 
 func (s *Server) routes() chi.Router {
 	r := chi.NewRouter()

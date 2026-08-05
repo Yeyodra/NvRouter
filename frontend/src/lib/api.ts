@@ -679,7 +679,12 @@ export interface QuotaAccount {
   status: string; // active | paused | needs_attention
   usage_type: string; // compatibility field; not a paid/free classification
   quota_supported?: boolean;
-  quota_state?: "reported" | "pending" | "paused" | "unavailable" | "error" | "usage_only";
+  quota_state?: "reported" | "stale" | "queued" | "refreshing" | "pending" | "paused" | "unsupported" | "unavailable" | "error" | "usage_only";
+  fetched_at?: string;
+  last_attempt_at?: string;
+  next_refresh_at?: string;
+  last_error?: string;
+  consecutive_failures?: number;
   total_requests: number;
   prompt_tokens: number;
   completion_tokens: number;
@@ -1337,8 +1342,8 @@ export const api = {
   validateKey: (input: AccountInput) =>
     request<{ status: string; message?: string }>("POST", "/validate-key", input),
   accountQuota: (id: string) =>
-    request<{ provider: string; supported: boolean; plan_name?: string; message?: string; quotas?: UpstreamQuota[] }>(
-      "GET", `/accounts/${id}/quota`,
+    request<{ accepted: boolean; state: NonNullable<QuotaAccount["quota_state"]>; plan_name?: string; message?: string; quotas?: UpstreamQuota[] }>(
+      "POST", `/accounts/${id}/quota`,
     ),
   codexResetCredits: (id: string) =>
     request<CodexResetCredits>("GET", `/accounts/${id}/codex-reset-credits`),
@@ -1368,21 +1373,12 @@ export const api = {
   modelUsage: (period: string) =>
     request<ModelUsageResponse>("GET", `/usage/models?period=${period}&tz=${browserTZ()}`),
 
-  // Quota list may probe dozens of upstream accounts concurrently; 20s default
-  // admin timeout aborts mid-probe and the page looks stuck in loading.
   quota: (period: string) =>
-    request<{ accounts: QuotaAccount[]; since: string }>(
-      "GET",
-      `/quota?period=${period}&tz=${browserTZ()}`,
-      undefined,
-      90_000,
-    ),
+    request<{ accounts: QuotaAccount[]; since: string }>("GET", `/quota?period=${period}&tz=${browserTZ()}`),
   quotaByProvider: (provider: string) =>
     request<{ accounts: QuotaAccount[]; since: string }>(
       "GET",
       `/quota?period=today&tz=${browserTZ()}&provider=${provider}`,
-      undefined,
-      90_000,
     ),
 
   consoleLog: () => request<{ logs: ConsoleLogEntry[] }>("GET", "/console"),

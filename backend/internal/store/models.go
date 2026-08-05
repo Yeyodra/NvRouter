@@ -402,6 +402,19 @@ type ResourceBucket struct {
 	InflightMax int64
 }
 
+// QuotaSnapshot is the last persisted upstream quota result for one account.
+type QuotaSnapshot struct {
+	AccountID           string     `json:"account_id"`
+	Provider            string     `json:"provider"`
+	Payload             string     `json:"-"`
+	State               string     `json:"state"`
+	FetchedAt           *time.Time `json:"fetched_at,omitempty"`
+	LastAttemptAt       time.Time  `json:"last_attempt_at"`
+	NextRefreshAt       time.Time  `json:"next_refresh_at"`
+	LastError           string     `json:"last_error,omitempty"`
+	ConsecutiveFailures int        `json:"consecutive_failures"`
+}
+
 // ProviderHealthCurrent is the rolled-up current health state for one
 // provider/account/model/capability key. It is updated by both real-traffic
 // telemetry aggregation and synthetic probes for fast dashboard loading.

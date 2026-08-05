@@ -47,7 +47,7 @@ func (s *Server) mountAdmin(r chi.Router) {
 	r.Patch("/accounts/{id}", s.adminUpdateAccount)
 	r.Delete("/accounts/{id}", s.adminDeleteAccount)
 	r.Post("/accounts/{id}/test", s.adminTestAccount)
-	r.Get("/accounts/{id}/quota", s.adminAccountQuota)
+	r.Post("/accounts/{id}/quota", s.adminAccountQuota)
 	r.Get("/accounts/{id}/codex-reset-credits", s.adminCodexResetCredits)
 	r.Post("/accounts/{id}/codex-consume-credit", s.adminCodexConsumeCredit)
 	r.Get("/accounts/{id}/codex-usage-details", s.adminCodexUsageDetails)
@@ -1151,72 +1151,33 @@ func (s *Server) adminTestAccount(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// adminAccountQuota fetches upstream quota/credit info for a specific account.
+// adminAccountQuota queues an upstream quota refresh for a specific account.
 func (s *Server) adminAccountQuota(w http.ResponseWriter, r *http.Request) {
 	acc, err := s.accounts.Get(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		writeError(w, http.StatusNotFound, "account not found")
 		return
 	}
-
-	qs := connectors.GetQuotaSource(acc.Provider)
-	if qs == nil {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"provider":  acc.Provider,
-			"supported": false,
-			"message":   "Upstream quota not available for this provider.",
-		})
+	if s.quotaScheduler == nil {
+		writeError(w, http.StatusServiceUnavailable, "quota scheduler not configured")
 		return
 	}
-
-	if s.vault == nil {
-		writeError(w, http.StatusInternalServerError, "vault not configured")
+	if acc.Disabled {
+		writeJSON(w, http.StatusConflict, map[string]any{"accepted": false, "state": "paused"})
 		return
 	}
-
-	// Quota endpoints are often called after the page has been idle for a while.
-	// Refresh OAuth credentials first so one stale account does not lose its
-	// usage panel while the rest of the provider page continues to work.
-	quotaAcc := acc
-	if s.refresher != nil {
-		if refreshed, refreshErr := s.refresher.EnsureFresh(r.Context(), acc); refreshErr == nil {
-			quotaAcc = refreshed
+	if connectors.GetQuotaSource(acc.Provider) == nil {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"accepted": false, "state": "unsupported"})
+		return
+	}
+	accepted := s.quotaScheduler.enqueue(acc, true)
+	state := "queued"
+	if !accepted {
+		if snapshot, getErr := s.db.QuotaSnapshots().Get(r.Context(), acc.ID); getErr == nil && snapshot.State != "" {
+			state = snapshot.State
 		}
 	}
-
-	creds, err := s.vault.Open(quotaAcc)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not decrypt credentials")
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-	defer cancel()
-
-	quota, qerr := qs.FetchQuota(ctx, creds)
-	if qerr != nil {
-		writeError(w, http.StatusBadGateway, qerr.Error())
-		return
-	}
-
-	var quotas []map[string]any
-	for _, q := range quota.Quotas {
-		quotas = append(quotas, map[string]any{
-			"resource_type": q.ResourceType,
-			"used":          q.Used,
-			"limit":         q.Limit,
-			"remaining":     q.Remaining,
-			"reset_at":      q.ResetAt,
-		})
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"provider":  acc.Provider,
-		"supported": true,
-		"plan_name": quota.PlanName,
-		"message":   quota.Message,
-		"quotas":    quotas,
-	})
+	writeJSON(w, http.StatusAccepted, map[string]any{"accepted": accepted, "state": state})
 }
 
 // adminCodexResetCredits fetches available Codex rate-limit reset credits and

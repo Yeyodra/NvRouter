@@ -65,6 +65,7 @@ type App struct {
 	healthChecker      *healthcheck.Checker
 	providerHealth     *health.Service
 	probeRunner        *health.ProbeRunner
+	gateway            *gateway.Server
 
 	// bg tracks long-lived background workers that touch the DB (oauth
 	// keepalive, health checker, cooldown sweeper) so shutdown can wait for
@@ -432,7 +433,7 @@ func Build(ctx context.Context, cfg config.Config, log *slog.Logger, version str
 	// usable without a manual "connect" step in the dashboard.
 	seedFreeAccounts(ctx, db.Accounts(), log)
 
-	return &App{cfg: cfg, log: log, db: db, accounts: db.Accounts(), server: srv, keepAlive: keepAlive, guardrailAudit: guardrailAudit, guardrailRetention: guardrailRetention, meter: mtr, healthChecker: healthChecker, providerHealth: healthSvc, probeRunner: probeRunner}, nil
+	return &App{cfg: cfg, log: log, db: db, accounts: db.Accounts(), server: srv, keepAlive: keepAlive, guardrailAudit: guardrailAudit, guardrailRetention: guardrailRetention, meter: mtr, healthChecker: healthChecker, providerHealth: healthSvc, probeRunner: probeRunner, gateway: gw}, nil
 }
 
 // seedFreeAccounts auto-creates a default account for providers that are free
@@ -494,6 +495,13 @@ func seedFreeAccounts(ctx context.Context, accounts *store.AccountRepo, log *slo
 // Run starts the HTTP server and blocks until ctx is cancelled, then shuts down
 // gracefully.
 func (a *App) Run(ctx context.Context) error {
+	if a.gateway != nil {
+		a.bg.Add(1)
+		go func() {
+			defer a.bg.Done()
+			a.gateway.RunQuotaScheduler(ctx)
+		}()
+	}
 	// Launch the OAuth keepalive loop so tokens stay fresh between requests.
 	if a.keepAlive != nil {
 		a.bg.Add(1)
