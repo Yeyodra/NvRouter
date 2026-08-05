@@ -32,7 +32,7 @@ func NewOpenAIResponses(id, defaultBaseURL string) *OpenAIResponses {
 		defaultBase: defaultBaseURL,
 		// The ChatGPT Codex backend needs a tailored request shape (reasoning
 		// summary, encrypted-content include, default instructions).
-		codec: transform.OpenAIResponsesCodec{Codex: id == "codex"},
+		codec: transform.OpenAIResponsesCodec{Codex: id == "codex", ReasoningProvider: id},
 	}
 }
 
@@ -124,6 +124,7 @@ func (c *OpenAIResponses) Chat(ctx context.Context, req *core.ChatRequest, creds
 	if err != nil {
 		return nil, &core.ProviderError{Kind: core.ErrUpstream, Provider: c.id, Model: req.Model, Message: err.Error(), Cause: err}
 	}
+	markReasoningProvider(&resp.Message, c.id)
 	return resp, nil
 }
 
@@ -193,6 +194,9 @@ func (c *OpenAIResponses) Stream(ctx context.Context, req *core.ChatRequest, cre
 				terminalSeen = true
 			}
 			for _, ch := range chunks {
+				if ch.Type == core.ChunkThinking && ch.Signature != "" {
+					ch.SignatureProvider = c.id
+				}
 				ttft.maybeReport(ch)
 				select {
 				case out <- ch:
@@ -211,6 +215,14 @@ func (c *OpenAIResponses) Stream(ctx context.Context, req *core.ChatRequest, cre
 		}
 	}()
 	return out, nil
+}
+
+func markReasoningProvider(msg *core.Message, provider string) {
+	for i := range msg.Content {
+		if msg.Content[i].Type == core.PartThinking && msg.Content[i].Signature != "" {
+			msg.Content[i].SignatureProvider = provider
+		}
+	}
 }
 
 // isResponsesTerminalPayload checks if an SSE data payload contains a terminal

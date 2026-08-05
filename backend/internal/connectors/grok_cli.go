@@ -42,7 +42,7 @@ type GrokCLI struct {
 
 // NewGrokCLI builds a Grok CLI / Grok Build connector.
 func NewGrokCLI(id, defaultBaseURL string) *GrokCLI {
-	return &GrokCLI{id: id, defaultBase: defaultBaseURL}
+	return &GrokCLI{id: id, defaultBase: defaultBaseURL, codec: transform.OpenAIResponsesCodec{ReasoningProvider: "grok-cli", InternalReasoningProvenance: true}}
 }
 
 func (c *GrokCLI) ID() string            { return c.id }
@@ -77,8 +77,7 @@ func resolveGrokCLIModel(model string) (upstream, effort string) {
 	return upstream, effort
 }
 
-// chatHeaders builds fingerprint headers for chat/stream.
-// NEVER sets x-xai-token-auth (that is validate/models-probe only).
+// chatHeaders mirrors the official Grok Build chat fingerprint.
 // req may be nil (falls back to uuid session + turn 1).
 func (c *GrokCLI) chatHeaders(creds core.Credentials, model string, req *core.ChatRequest) map[string]string {
 	token := creds.AccessToken
@@ -98,6 +97,11 @@ func (c *GrokCLI) chatHeaders(creds core.Credentials, model string, req *core.Ch
 		"x-grok-req-id":            reqID,
 		"x-grok-turn-idx":          strconv.Itoa(turnIdx),
 		"x-grok-model-override":    model,
+		"x-xai-token-auth":         grokCLITokenAuth,
+		"x-authenticateresponse":   "authenticate-response",
+		"x-grok-client-mode":       "interactive",
+		"x-grok-doom-loop-check":   "true",
+		"x-compaction-at":          "400000",
 	}
 	if agentID := resolveGrokCLIAgentID(creds); agentID != "" {
 		h["x-grok-agent-id"] = agentID
@@ -253,8 +257,13 @@ func normalizeGrokCLIInput(m map[string]any) {
 		typ, _ := v["type"].(string)
 		switch typ {
 		case "reasoning":
-			// Canonical history does not retain a trusted native Grok item id.
-			continue
+			provider, _ := v["signature_provider"].(string)
+			id, _ := v["id"].(string)
+			encrypted, _ := v["encrypted_content"].(string)
+			if provider != "grok-cli" || id == "" || encrypted == "" {
+				continue
+			}
+			v = map[string]any{"type": "reasoning", "id": id, "encrypted_content": encrypted}
 		case "custom_tool_call":
 			callID, _ := firstToolString(v["call_id"], v["id"])
 			name, _ := v["name"].(string)
@@ -537,6 +546,9 @@ func (c *GrokCLI) Stream(ctx context.Context, req *core.ChatRequest, creds core.
 				terminalSeen = true
 			}
 			for _, ch := range chunks {
+				if ch.Type == core.ChunkThinking && ch.Signature != "" {
+					ch.SignatureProvider = "grok-cli"
+				}
 				ttft.maybeReport(ch)
 				select {
 				case out <- ch:

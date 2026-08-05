@@ -54,6 +54,9 @@ type ContentPart struct {
 	// Signature carries provider-specific opaque data for thinking/reasoning
 	// blocks that must be echoed back on follow-up turns (e.g. Anthropic).
 	Signature string `json:"signature,omitempty"`
+	// Native opaque reasoning identity/provenance; never projected publicly.
+	SignatureID       string `json:"-"`
+	SignatureProvider string `json:"-"`
 }
 
 // MediaPayload represents binary or referenced media content.

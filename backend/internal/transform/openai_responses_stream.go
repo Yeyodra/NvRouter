@@ -58,10 +58,11 @@ type respStreamEvent struct {
 }
 
 type respStreamItem struct {
-	Type   string `json:"type"`
-	ID     string `json:"id"`
-	CallID string `json:"call_id"`
-	Name   string `json:"name"`
+	Type             string `json:"type"`
+	ID               string `json:"id"`
+	CallID           string `json:"call_id"`
+	Name             string `json:"name"`
+	EncryptedContent string `json:"encrypted_content"`
 }
 
 type respParseState struct {
@@ -154,6 +155,12 @@ func (s *respParseState) parse(line []byte, _ string) ([]core.StreamChunk, error
 					Kind:      kind,
 				},
 			}}, nil
+		}
+		return nil, nil
+
+	case "response.output_item.done":
+		if ev.Item != nil && ev.Item.Type == "reasoning" && ev.Item.EncryptedContent != "" {
+			return []core.StreamChunk{{Type: core.ChunkThinking, Signature: ev.Item.EncryptedContent, SignatureID: ev.Item.ID}}, nil
 		}
 		return nil, nil
 
@@ -276,28 +283,31 @@ func classifyRespStreamError(msg string) *core.ProviderError {
 // respStreamState tracks per-stream rendering bookkeeping for the Responses
 // event sequence, stashed in StreamState.Custom.
 type respStreamState struct {
-	seq           int
-	started       bool
-	responseID    string
-	msgAdded      bool
-	msgPartAdded  bool
-	msgText       string
-	msgIdx        int
-	reasoningIdx  int
-	reasoningText string
-	nextOutput    int
-	toolOutput    map[int]int
-	toolAdded     map[int]bool
-	toolCallID    map[int]string
-	toolName      map[int]string
-	toolKind      map[int]core.ToolCallKind
-	toolArgs      map[int]string
-	usage         *core.Usage
-	finished      bool
-	completed     bool
-	failed        bool
-	finishReason  core.FinishReason
-	finishDetail  string
+	seq             int
+	started         bool
+	responseID      string
+	msgAdded        bool
+	msgPartAdded    bool
+	msgText         string
+	msgIdx          int
+	reasoningIdx    int
+	reasoningText   string
+	reasoningID     string
+	reasoningSig    string
+	reasoningWireID string
+	nextOutput      int
+	toolOutput      map[int]int
+	toolAdded       map[int]bool
+	toolCallID      map[int]string
+	toolName        map[int]string
+	toolKind        map[int]core.ToolCallKind
+	toolArgs        map[int]string
+	usage           *core.Usage
+	finished        bool
+	completed       bool
+	failed          bool
+	finishReason    core.FinishReason
+	finishDetail    string
 }
 
 func respState(state *StreamState) *respStreamState {
@@ -397,7 +407,16 @@ func (OpenAIResponsesCodec) RenderStreamChunk(chunk core.StreamChunk, state *Str
 
 	case core.ChunkThinking:
 		ensureStarted()
-		rsID := "rs_" + s.responseID + "_0"
+		if chunk.SignatureID != "" {
+			s.reasoningID = chunk.SignatureID
+		}
+		if chunk.Signature != "" {
+			s.reasoningSig = chunk.Signature
+		}
+		if s.reasoningWireID == "" {
+			s.reasoningWireID = firstNonEmpty(s.reasoningID, "rs_"+s.responseID+"_0")
+		}
+		rsID := s.reasoningWireID
 		output := outputIndex("reasoning", 0)
 		if _, ok := state.Custom["resp_reasoning_added"]; !ok {
 			state.Custom["resp_reasoning_added"] = true
@@ -406,10 +425,12 @@ func (OpenAIResponsesCodec) RenderStreamChunk(chunk core.StreamChunk, state *Str
 				"item":         map[string]any{"id": rsID, "type": "reasoning", "summary": []any{}},
 			})
 		}
-		s.reasoningText += chunk.Delta
-		emit("response.reasoning_summary_text.delta", map[string]any{
-			"item_id": rsID, "output_index": output, "summary_index": 0, "delta": chunk.Delta,
-		})
+		if chunk.Delta != "" {
+			s.reasoningText += chunk.Delta
+			emit("response.reasoning_summary_text.delta", map[string]any{
+				"item_id": rsID, "output_index": output, "summary_index": 0, "delta": chunk.Delta,
+			})
+		}
 
 	case core.ChunkToolCall:
 		if chunk.ToolCall == nil {
@@ -474,17 +495,23 @@ func (OpenAIResponsesCodec) RenderStreamChunk(chunk core.StreamChunk, state *Str
 				},
 			})
 		}
-		if s.reasoningText != "" {
-			rsID := "rs_" + s.responseID + "_0"
-			emit("response.reasoning_summary_text.done", map[string]any{
-				"item_id": rsID, "output_index": s.reasoningIdx, "summary_index": 0, "text": s.reasoningText,
-			})
+		if s.reasoningText != "" || s.reasoningSig != "" {
+			rsID := firstNonEmpty(s.reasoningWireID, s.reasoningID, "rs_"+s.responseID+"_0")
+			if s.reasoningText != "" {
+				emit("response.reasoning_summary_text.done", map[string]any{
+					"item_id": rsID, "output_index": s.reasoningIdx, "summary_index": 0, "text": s.reasoningText,
+				})
+			}
+			item := map[string]any{"id": rsID, "type": "reasoning", "summary": []any{}}
+			if s.reasoningText != "" {
+				item["summary"] = []map[string]any{{"type": "summary_text", "text": s.reasoningText}}
+			}
+			if s.reasoningSig != "" {
+				item["encrypted_content"] = s.reasoningSig
+			}
 			emit("response.output_item.done", map[string]any{
 				"output_index": s.reasoningIdx,
-				"item": map[string]any{
-					"id": rsID, "type": "reasoning",
-					"summary": []map[string]any{{"type": "summary_text", "text": s.reasoningText}},
-				},
+				"item":         item,
 			})
 		}
 		indices := make([]int, 0, len(s.toolCallID))

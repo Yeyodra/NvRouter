@@ -23,6 +23,12 @@ type OpenAIResponsesCodec struct {
 	// It is set by the codex connector; the zero value renders the plain
 	// OpenAI Responses API shape.
 	Codex bool
+	// ReasoningProvider permits opaque reasoning replay only for matching
+	// router-authenticated provenance.
+	ReasoningProvider string
+	// InternalReasoningProvenance carries the trusted provider marker only to a
+	// provider-specific post-render hook; direct wire codecs must leave it false.
+	InternalReasoningProvenance bool
 }
 
 func (OpenAIResponsesCodec) Dialect() core.Dialect { return core.DialectOpenAIResponses }
@@ -180,6 +186,7 @@ func (OpenAIResponsesCodec) ParseRequest(body []byte) (*core.ChatRequest, error)
 
 	var pendingReasoning string
 	var pendingEncrypted string
+	var pendingReasoningID string
 	for _, item := range items {
 		itemType := item.Type
 		if itemType == "" && item.Role != "" {
@@ -192,13 +199,16 @@ func (OpenAIResponsesCodec) ParseRequest(body []byte) (*core.ChatRequest, error)
 			if pendingReasoning != "" || pendingEncrypted != "" {
 				if item.Role == "assistant" {
 					msg.Content = append(msg.Content, core.ContentPart{
-						Type:      core.PartThinking,
-						Text:      pendingReasoning,
-						Signature: pendingEncrypted,
+						Type:              core.PartThinking,
+						Text:              pendingReasoning,
+						Signature:         pendingEncrypted,
+						SignatureID:       pendingReasoningID,
+						SignatureProvider: "responses-native",
 					})
 				}
 				pendingReasoning = ""
 				pendingEncrypted = ""
+				pendingReasoningID = ""
 			}
 			msg.Content = append(msg.Content, parseRespContent(item.Content)...)
 			req.Messages = append(req.Messages, msg)
@@ -218,12 +228,15 @@ func (OpenAIResponsesCodec) ParseRequest(body []byte) (*core.ChatRequest, error)
 			msg := core.Message{Role: core.RoleAssistant}
 			if pendingReasoning != "" || pendingEncrypted != "" {
 				msg.Content = append(msg.Content, core.ContentPart{
-					Type:      core.PartThinking,
-					Text:      pendingReasoning,
-					Signature: pendingEncrypted,
+					Type:              core.PartThinking,
+					Text:              pendingReasoning,
+					Signature:         pendingEncrypted,
+					SignatureID:       pendingReasoningID,
+					SignatureProvider: "responses-native",
 				})
 				pendingReasoning = ""
 				pendingEncrypted = ""
+				pendingReasoningID = ""
 			}
 			msg.Content = append(msg.Content, core.ContentPart{
 				Type:     core.PartToolCall,
@@ -248,6 +261,7 @@ func (OpenAIResponsesCodec) ParseRequest(body []byte) (*core.ChatRequest, error)
 				}
 				pendingReasoning += txt
 				pendingEncrypted = encrypted
+				pendingReasoningID = item.ID
 			}
 		}
 	}
@@ -411,7 +425,14 @@ func (c OpenAIResponsesCodec) RenderRequest(req *core.ChatRequest) ([]byte, erro
 			for _, p := range m.Content {
 				if p.Type == core.PartThinking && (p.Text != "" || p.Signature != "") {
 					reasoningItem := map[string]any{"type": "reasoning"}
-					if p.Signature != "" {
+					trusted := c.ReasoningProvider != "" && p.SignatureProvider == c.ReasoningProvider
+					if trusted && p.SignatureID != "" {
+						reasoningItem["id"] = p.SignatureID
+					}
+					if trusted && c.InternalReasoningProvenance {
+						reasoningItem["signature_provider"] = p.SignatureProvider
+					}
+					if trusted && p.Signature != "" {
 						reasoningItem["encrypted_content"] = p.Signature
 					}
 					if p.Text != "" {
@@ -582,6 +603,7 @@ type respUnary struct {
 		Reason string `json:"reason"`
 	} `json:"incomplete_details"`
 	Output []struct {
+		ID               string            `json:"id"`
 		Type             string            `json:"type"`
 		Role             string            `json:"role"`
 		Content          []respContentPart `json:"content"`
@@ -627,9 +649,11 @@ func (OpenAIResponsesCodec) ParseResponse(body []byte, model string) (*core.Chat
 			}
 			if b.Len() > 0 || item.EncryptedContent != "" {
 				msg.Content = append(msg.Content, core.ContentPart{
-					Type:      core.PartThinking,
-					Text:      b.String(),
-					Signature: item.EncryptedContent,
+					Type:              core.PartThinking,
+					Text:              b.String(),
+					Signature:         item.EncryptedContent,
+					SignatureID:       item.ID,
+					SignatureProvider: "responses-native",
 				})
 			}
 		case "message":

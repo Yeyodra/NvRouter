@@ -100,7 +100,17 @@ func (a *StreamResponseAssembler) consume(chunk core.StreamChunk) {
 	case core.ChunkText:
 		a.appendText(core.PartText, chunk.Delta, "")
 	case core.ChunkThinking:
-		a.appendText(core.PartThinking, chunk.Delta, chunk.Signature)
+		if chunk.Delta != "" {
+			a.appendText(core.PartThinking, chunk.Delta, chunk.Signature)
+		} else if chunk.Signature != "" {
+			if n := len(a.content); n > 0 && a.content[n-1].Type == core.PartThinking {
+				a.content[n-1].Signature = chunk.Signature
+				a.content[n-1].SignatureID = chunk.SignatureID
+				a.content[n-1].SignatureProvider = chunk.SignatureProvider
+			} else {
+				a.content = append(a.content, core.ContentPart{Type: core.PartThinking, Signature: chunk.Signature, SignatureID: chunk.SignatureID, SignatureProvider: chunk.SignatureProvider})
+			}
+		}
 	case core.ChunkToolCall:
 		if chunk.ToolCall != nil {
 			slots := a.toolSlots[chunk.Index]

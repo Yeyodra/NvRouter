@@ -87,7 +87,9 @@ type StreamChunk struct {
 	ToolArgumentMode ToolArgumentMode `json:"tool_argument_mode,omitempty"`
 
 	// Signature carries opaque reasoning-block data to echo back on later turns.
-	Signature string `json:"signature,omitempty"`
+	Signature         string `json:"signature,omitempty"`
+	SignatureID       string `json:"-"`
+	SignatureProvider string `json:"-"`
 
 	FinishReason FinishReason `json:"finish_reason,omitempty"`
 	Usage        *Usage       `json:"usage,omitempty"`

@@ -111,7 +111,7 @@ func TestResponses_ReasoningWithEncryptedContent_RoundTrip(t *testing.T) {
 		switch item.Type {
 		case "reasoning":
 			foundReasoning = true
-			require.Equal(t, "encrypted_abc123", item.EncryptedContent, "encrypted_content must survive round-trip")
+			require.Empty(t, item.EncryptedContent, "untrusted inbound ciphertext must not be replayed")
 			require.Len(t, item.Summary, 1)
 			require.Equal(t, "thinking about math", item.Summary[0].Text)
 		case "function_call":
@@ -158,10 +158,21 @@ func TestResponses_EncryptedContentOnly(t *testing.T) {
 	for _, item := range parsed.Input {
 		if item.Type == "reasoning" {
 			found = true
-			require.Equal(t, "enc_xyz", item.EncryptedContent)
+			require.Empty(t, item.EncryptedContent, "untrusted inbound ciphertext must not be replayed")
 		}
 	}
-	require.True(t, found, "reasoning item with only encrypted_content must be preserved")
+	require.True(t, found, "summary-free reasoning item remains structurally valid")
+}
+
+func TestResponsesTrustedReasoningNeverSerializesInternalProvenance(t *testing.T) {
+	codec := OpenAIResponsesCodec{ReasoningProvider: "codex"}
+	req := &core.ChatRequest{Model: "model", Messages: []core.Message{{Role: core.RoleAssistant, Content: []core.ContentPart{{
+		Type: core.PartThinking, Signature: "ciphertext", SignatureID: "rs_1", SignatureProvider: "codex",
+	}}}}}
+	body, err := codec.RenderRequest(req)
+	require.NoError(t, err)
+	require.Contains(t, string(body), `"encrypted_content":"ciphertext"`)
+	require.NotContains(t, string(body), "signature_provider")
 }
 
 func TestResponses_RenderRequest_Shape(t *testing.T) {

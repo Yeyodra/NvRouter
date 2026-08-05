@@ -49,9 +49,8 @@ func countGrokCLIUserTurns(req *core.ChatRequest) int {
 	return max(1, n)
 }
 
-// resolveGrokCLITurnIdx returns a monotonic turn index for sessionID.
-// Prefers user-message count; never decreases vs last value for the same session
-// in this process (matches 9router resolveGrokCliTurnIdx with requestKey set).
+// resolveGrokCLITurnIdx advances only when the user-message count advances.
+// Tool continuations stay on the same official Grok Build turn index.
 func resolveGrokCLITurnIdx(sessionID string, fromInput int) int {
 	if fromInput < 1 {
 		fromInput = 1
@@ -77,11 +76,7 @@ func resolveGrokCLITurnIdx(sessionID string, fromInput int) int {
 		}
 	}
 
-	// Each call is a distinct request (like 9router requestKey=body): advance.
-	turn := fromInput
-	if prev > 0 && prev+1 > turn {
-		turn = prev + 1
-	}
+	turn := max(prev, fromInput)
 
 	// Evict only when inserting a new session key.
 	if !existed {

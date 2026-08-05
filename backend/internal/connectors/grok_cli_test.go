@@ -75,8 +75,11 @@ func TestGrokCLI_ChatHeaders_NoTokenAuth(t *testing.T) {
 	require.NotEmpty(t, h["x-grok-req-id"])
 	require.Equal(t, "1", h["x-grok-turn-idx"])
 	require.NotEmpty(t, h["x-grok-agent-id"])
-	_, has := h["x-xai-token-auth"]
-	require.False(t, has, "chat headers must never set x-xai-token-auth")
+	require.Equal(t, grokCLITokenAuth, h["x-xai-token-auth"])
+	require.Equal(t, "authenticate-response", h["x-authenticateresponse"])
+	require.Equal(t, "interactive", h["x-grok-client-mode"])
+	require.Equal(t, "true", h["x-grok-doom-loop-check"])
+	require.Equal(t, "400000", h["x-compaction-at"])
 }
 
 func TestGrokCLI_TurnIdx_IncreasesWithUserMessages(t *testing.T) {
@@ -108,12 +111,11 @@ func TestGrokCLI_TurnIdx_IncreasesWithUserMessages(t *testing.T) {
 	require.Equal(t, "2", h2["x-grok-turn-idx"])
 }
 
-func TestGrokCLI_TurnIdx_NeverDecreasesSameSession(t *testing.T) {
+func TestGrokCLI_TurnIdx_ToolContinuationStaysOnUserTurn(t *testing.T) {
 	resetGrokCLITurnStore()
 	c := NewGrokCLI("grok-cli", "https://cli-chat-proxy.grok.com/v1")
 	creds := core.Credentials{AccessToken: "tok"}
-	// Full history clients may send growing message lists; delta clients may
-	// re-send only the latest user message (count=1). Store must not go back.
+	// Official Grok Build keeps the same turn index while a tool loop continues.
 	reqFull := &core.ChatRequest{
 		Model:    "grok-4.5",
 		Metadata: core.RequestMetadata{ContextAffinityKey: "sess-mono"},
@@ -139,9 +141,8 @@ func TestGrokCLI_TurnIdx_NeverDecreasesSameSession(t *testing.T) {
 
 	require.Equal(t, "sess-mono", h1["x-grok-session-id"])
 	require.Equal(t, "3", h1["x-grok-turn-idx"])
-	// prev=3, fromInput=1 → max(1, 3+1)=4
-	require.Equal(t, "4", h2["x-grok-turn-idx"])
-	require.Equal(t, "5", h3["x-grok-turn-idx"])
+	require.Equal(t, "3", h2["x-grok-turn-idx"])
+	require.Equal(t, "3", h3["x-grok-turn-idx"])
 }
 
 func TestGrokCLI_SessionID_FromPromptCacheKey(t *testing.T) {
@@ -540,6 +541,48 @@ func TestGrokCLI_RenderBody_CrossProviderToolHistory(t *testing.T) {
 	}, tool["parameters"])
 }
 
+func TestGrokCLI_RenderBody_RejectsUntrustedResponsesReasoning(t *testing.T) {
+	c := NewGrokCLI("grok-cli", "https://cli-chat-proxy.grok.com/v1")
+	req := &core.ChatRequest{Model: "grok-4.5", Messages: []core.Message{{
+		Role: core.RoleAssistant,
+		Content: []core.ContentPart{{
+			Type: core.PartThinking, Signature: "foreign-ciphertext", SignatureID: "rs_foreign", SignatureProvider: "responses-native",
+		}},
+	}}}
+	body, _, err := c.renderBody(req)
+	require.NoError(t, err)
+	var out map[string]any
+	require.NoError(t, json.Unmarshal(body, &out))
+	for _, item := range out["input"].([]any) {
+		require.NotEqual(t, "reasoning", item.(map[string]any)["type"])
+	}
+}
+
+func TestGrokCLI_RenderBody_ReplaysNativeEncryptedReasoning(t *testing.T) {
+	c := NewGrokCLI("grok-cli", "https://cli-chat-proxy.grok.com/v1")
+	req := &core.ChatRequest{
+		Model: "grok-4.5",
+		Messages: []core.Message{
+			{Role: core.RoleAssistant, Content: []core.ContentPart{
+				{Type: core.PartThinking, Signature: "native-ciphertext", SignatureID: "rs_native_1", SignatureProvider: "grok-cli"},
+				{Type: core.PartToolCall, ToolCall: &core.ToolCall{ID: "call_1", Name: "calculator", Arguments: json.RawMessage(`{"a":19,"b":23}`)}},
+			}},
+			{Role: core.RoleTool, Content: []core.ContentPart{{Type: core.PartToolResult, ToolResult: &core.ToolResult{CallID: "call_1", Content: "42"}}}},
+		},
+	}
+	body, _, err := c.renderBody(req)
+	require.NoError(t, err)
+
+	var out map[string]any
+	require.NoError(t, json.Unmarshal(body, &out))
+	input := out["input"].([]any)
+	require.Equal(t, map[string]any{
+		"type": "reasoning", "id": "rs_native_1", "encrypted_content": "native-ciphertext",
+	}, input[0])
+	require.Equal(t, "function_call", input[1].(map[string]any)["type"])
+	require.Equal(t, "function_call_output", input[2].(map[string]any)["type"])
+}
+
 func TestGrokCLI_RenderBody_PreservesForcedToolChoice(t *testing.T) {
 	c := NewGrokCLI("grok-cli", "https://cli-chat-proxy.grok.com/v1")
 	req := &core.ChatRequest{
@@ -553,6 +596,29 @@ func TestGrokCLI_RenderBody_PreservesForcedToolChoice(t *testing.T) {
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(body, &got))
 	require.Equal(t, map[string]any{"type": "function", "name": "calculator"}, got["tool_choice"])
+}
+
+func TestGrokCLI_StreamCapturesNativeEncryptedReasoning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, event := range []string{
+			`{"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_native_1","summary":[],"encrypted_content":"native-ciphertext"}}`,
+			`{"type":"response.completed","response":{"status":"completed"}}`,
+		} {
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", event)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewGrokCLI("grok-cli", srv.URL)
+	resp, err := c.Chat(context.Background(), &core.ChatRequest{Model: "grok-4.5", Messages: []core.Message{{Role: core.RoleUser}}}, core.Credentials{AccessToken: "tok"})
+	require.NoError(t, err)
+	require.Len(t, resp.Message.Content, 1)
+	reasoning := resp.Message.Content[0]
+	require.Equal(t, core.PartThinking, reasoning.Type)
+	require.Equal(t, "native-ciphertext", reasoning.Signature)
+	require.Equal(t, "rs_native_1", reasoning.SignatureID)
+	require.Equal(t, "grok-cli", reasoning.SignatureProvider)
 }
 
 func TestGrokCLI_StreamPreservesToolIdentityAcrossEvents(t *testing.T) {

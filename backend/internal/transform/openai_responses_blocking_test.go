@@ -1,6 +1,7 @@
 package transform
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -120,6 +121,47 @@ func TestResponsesErrorRendersNativeFailedWithoutCompleted(t *testing.T) {
 	}
 	if strings.Contains(out, "response.completed") {
 		t.Fatalf("failed response also completed successfully: %s", out)
+	}
+}
+
+func TestResponsesSignatureOnlyReasoningClosesWithoutEmptyDelta(t *testing.T) {
+	codec := OpenAIResponsesCodec{}
+	state := &StreamState{}
+	var out string
+	for _, chunk := range []core.StreamChunk{
+		{Type: core.ChunkThinking, Signature: "ciphertext", SignatureID: "rs_native"},
+		{Type: core.ChunkFinish, FinishReason: core.FinishStop},
+	} {
+		events, err := codec.RenderStreamChunk(chunk, state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out += string(bytes.Join(events, nil))
+	}
+	out += string(bytes.Join(codec.RenderStreamDone(state), nil))
+	if strings.Contains(out, `reasoning_summary_text.delta`) || !strings.Contains(out, `"encrypted_content":"ciphertext"`) || !strings.Contains(out, `response.output_item.done`) {
+		t.Fatalf("invalid signature-only reasoning stream: %s", out)
+	}
+}
+
+func TestResponsesLateReasoningSignatureKeepsOpenedWireID(t *testing.T) {
+	codec := OpenAIResponsesCodec{}
+	state := &StreamState{}
+	var out string
+	for _, chunk := range []core.StreamChunk{
+		{Type: core.ChunkThinking, Delta: "summary"},
+		{Type: core.ChunkThinking, Signature: "ciphertext", SignatureID: "rs_native"},
+		{Type: core.ChunkFinish, FinishReason: core.FinishStop},
+	} {
+		events, err := codec.RenderStreamChunk(chunk, state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out += string(bytes.Join(events, nil))
+	}
+	opened := `"id":"rs_resp_stream_0"`
+	if strings.Count(out, opened) < 2 || strings.Contains(out, `"id":"rs_native"`) {
+		t.Fatalf("reasoning wire id changed after item opened: %s", out)
 	}
 }
 
