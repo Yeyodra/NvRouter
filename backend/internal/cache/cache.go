@@ -23,17 +23,20 @@ import (
 
 // Entry is a cached response keyed by its prompt embedding.
 type Entry struct {
-	Vector   []float32
-	Response *core.ChatResponse
-	Model    string
-	StoredAt time.Time
+	Key       string
+	Vector    []float32
+	Response  *core.ChatResponse
+	Provider  string
+	Model     string
+	AccountID string
+	StoredAt  time.Time
 }
 
 // Store is the pluggable backend for cached entries.
 type Store interface {
 	// Nearest returns the most similar entry to vec and its cosine similarity,
 	// or ok=false when the store is empty.
-	Nearest(ctx context.Context, vec []float32) (Entry, float64, bool, error)
+	Nearest(ctx context.Context, key string, vec []float32) (Entry, float64, bool, error)
 	// Put inserts an entry.
 	Put(ctx context.Context, e Entry) error
 	// Len reports the number of stored entries (for metrics/eviction).
@@ -69,34 +72,30 @@ func New(cfg Config, store Store) *Cache {
 // Lookup returns a cached response whose prompt embedding is at least the
 // configured similarity to vec, or ok=false on a miss. Entries past their TTL
 // are treated as misses.
-func (c *Cache) Lookup(ctx context.Context, vec []float32) (*core.ChatResponse, bool, error) {
-	if !c.cfg.Enabled || len(vec) == 0 {
-		return nil, false, nil
+func (c *Cache) Lookup(ctx context.Context, key string, vec []float32) (Entry, bool, error) {
+	if !c.cfg.Enabled || key == "" || len(vec) == 0 {
+		return Entry{}, false, nil
 	}
-	entry, score, ok, err := c.store.Nearest(ctx, vec)
+	entry, score, ok, err := c.store.Nearest(ctx, key, vec)
 	if err != nil || !ok {
-		return nil, false, err
+		return Entry{}, false, err
 	}
 	if score < c.cfg.SimilarityThreshold {
-		return nil, false, nil
+		return Entry{}, false, nil
 	}
 	if c.cfg.TTL > 0 && time.Since(entry.StoredAt) > c.cfg.TTL {
-		return nil, false, nil
+		return Entry{}, false, nil
 	}
-	return entry.Response, true, nil
+	return entry, true, nil
 }
 
-// Store caches a response under its prompt embedding.
-func (c *Cache) Store(ctx context.Context, vec []float32, resp *core.ChatResponse) error {
-	if !c.cfg.Enabled || len(vec) == 0 || resp == nil {
+// Store caches an attributed response under its exact key and semantic vector.
+func (c *Cache) Store(ctx context.Context, entry Entry) error {
+	if !c.cfg.Enabled || entry.Key == "" || len(entry.Vector) == 0 || entry.Response == nil {
 		return nil
 	}
-	return c.store.Put(ctx, Entry{
-		Vector:   vec,
-		Response: resp,
-		Model:    resp.Model,
-		StoredAt: time.Now(),
-	})
+	entry.StoredAt = time.Now()
+	return c.store.Put(ctx, entry)
 }
 
 // Enabled reports whether the cache is active.
@@ -141,7 +140,7 @@ func (m *MemoryStore) evict(now time.Time) {
 }
 
 // Nearest returns the highest-cosine entry to vec.
-func (m *MemoryStore) Nearest(_ context.Context, vec []float32) (Entry, float64, bool, error) {
+func (m *MemoryStore) Nearest(_ context.Context, key string, vec []float32) (Entry, float64, bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.count == 0 && len(m.entries) == 0 {
@@ -152,6 +151,9 @@ func (m *MemoryStore) Nearest(_ context.Context, vec []float32) (Entry, float64,
 	var best Entry
 	bestScore := -1.0
 	for _, e := range m.entries {
+		if e.Key != key {
+			continue
+		}
 		if m.ttl > 0 && now.Sub(e.StoredAt) > m.ttl {
 			continue // skip expired entries
 		}

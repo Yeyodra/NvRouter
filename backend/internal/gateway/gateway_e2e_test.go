@@ -32,6 +32,7 @@ import (
 type e2eHarness struct {
 	server     *httptest.Server
 	apiKey     string
+	keyID      string
 	upstream   *httptest.Server
 	consoleLog *consolelog.Buffer
 	usage      *store.UsageRepo
@@ -75,6 +76,12 @@ func newE2E(t *testing.T, upstreamHandler http.HandlerFunc, registries ...*trans
 		Metadata: map[string]string{"base_url": upstream.URL},
 	}))
 	require.NoError(t, db.Accounts().Create(ctx, acc))
+	now := time.Now()
+	require.NoError(t, db.Chains().Create(ctx, store.Chain{
+		ID: "chain-public-safe-route", TenantID: store.DefaultTenantID, Name: "public-safe-route",
+		Steps:     []store.ChainStep{{ID: "step-public-safe-route", Position: 0, Provider: "openai", Model: "internal-model-canary", CreatedAt: now}},
+		CreatedAt: now, UpdatedAt: now,
+	}))
 
 	// Issue an API key.
 	idSvc := identity.New(db.APIKeys())
@@ -95,9 +102,12 @@ func newE2E(t *testing.T, upstreamHandler http.HandlerFunc, registries ...*trans
 	conLog := consolelog.New()
 	gw := New(Deps{
 		Config:     config.Default(),
+		DB:         db,
 		Identity:   idSvc,
 		Pipeline:   pipe,
 		Chains:     db.Chains(),
+		Budgets:    db.Budgets(),
+		Usage:      db.Usage(),
 		Codecs:     codecs,
 		ConsoleLog: conLog,
 	})
@@ -105,7 +115,7 @@ func newE2E(t *testing.T, upstreamHandler http.HandlerFunc, registries ...*trans
 	srv := httptest.NewServer(gw.Handler())
 	t.Cleanup(srv.Close)
 
-	return &e2eHarness{server: srv, apiKey: issued.Plaintext, upstream: upstream, consoleLog: conLog, usage: db.Usage()}
+	return &e2eHarness{server: srv, apiKey: issued.Plaintext, keyID: issued.Record.ID, upstream: upstream, consoleLog: conLog, usage: db.Usage()}
 }
 
 func (h *e2eHarness) post(t *testing.T, path, body, auth string) *http.Response {
@@ -141,7 +151,7 @@ func TestE2E_OpenAIChat_DirectProviderModel(t *testing.T) {
 	defer resp.Body.Close()
 
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	require.Equal(t, "openai", resp.Header.Get("X-KeiRouter-Provider"))
+	require.Empty(t, resp.Header.Get("X-KeiRouter-Provider"))
 
 	var out struct {
 		Choices []struct {

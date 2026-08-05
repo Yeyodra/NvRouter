@@ -62,7 +62,7 @@ func (r *UsageRepo) RecordBatch(ctx context.Context, records []UsageRecord) erro
 	return nil
 }
 
-const usageColumns = `id, request_id, tenant_id, project_id, api_key_id, provider, model, account_id, client,
+const usageColumns = `id, request_id, tenant_id, project_id, api_key_id, provider, model, public_model, account_id, client,
 	status, error_kind, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens,
 	reasoning_tokens, usage_source, cost_micros, cost_nanos, input_cost_nanos, cached_cost_nanos,
 	cache_write_cost_nanos, output_cost_nanos, reasoning_cost_nanos, avoided_cost_nanos, saved_cost_nanos,
@@ -115,7 +115,7 @@ func usageArgs(u UsageRecord) []any {
 	}
 	return []any{
 		u.ID, u.RequestID, u.TenantID, nullString(u.ProjectID), nullString(u.APIKeyID),
-		u.Provider, u.Model, nullString(u.AccountID), u.Client, u.Status, u.ErrorKind,
+		u.Provider, u.Model, nullString(u.PublicModel), nullString(u.AccountID), u.Client, u.Status, u.ErrorKind,
 		u.PromptTokens, u.CompletionTokens, u.CachedTokens, u.CacheWriteTokens,
 		u.ReasoningTokens, u.UsageSource, u.CostMicros, u.CostNanos,
 		u.InputCostNanos, u.CachedCostNanos, u.CacheWriteCostNanos, u.OutputCostNanos,
@@ -540,21 +540,19 @@ func (r *UsageRepo) ByModel(ctx context.Context, tenantID string, since time.Tim
 	return out, rows.Err()
 }
 
-// ByModelByKey returns per-model aggregate usage for a specific API key since
-// the given time, ordered by request volume (busiest first). Used by the portal
-// to show per-model breakdown.
+// ByModelByKey returns customer-visible usage grouped by the inbound public
+// route. Rows from before public-route persistence are grouped as legacy.
 func (r *UsageRepo) ByModelByKey(ctx context.Context, keyID string, since time.Time) ([]ModelUsage, error) {
 	q := r.db.rebind(`
 		SELECT
-			provider,
-			model,
+			CASE WHEN public_model IS NULL OR public_model = '' THEN 'legacy' ELSE public_model END,
 			COUNT(*),
 			COALESCE(SUM(prompt_tokens), 0),
 			COALESCE(SUM(completion_tokens), 0),
 			(COALESCE(SUM(CASE WHEN pricing_backfilled=0 THEN cost_nanos ELSE 0 END), 0) + 500) / 1000
 		FROM usage_records
 		WHERE api_key_id = ? AND created_at >= ?
-		GROUP BY provider, model
+		GROUP BY CASE WHEN public_model IS NULL OR public_model = '' THEN 'legacy' ELSE public_model END
 		ORDER BY COUNT(*) DESC`)
 	rows, err := r.db.sql.QueryContext(ctx, q, keyID, formatTime(since))
 	if err != nil {
@@ -565,7 +563,7 @@ func (r *UsageRepo) ByModelByKey(ctx context.Context, keyID string, since time.T
 	var out []ModelUsage
 	for rows.Next() {
 		var m ModelUsage
-		if err := rows.Scan(&m.Provider, &m.Model, &m.TotalRequests, &m.PromptTokens, &m.CompletionTokens, &m.CostMicros); err != nil {
+		if err := rows.Scan(&m.Model, &m.TotalRequests, &m.PromptTokens, &m.CompletionTokens, &m.CostMicros); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -793,11 +791,11 @@ func (r *UsageRepo) RecentByKey(ctx context.Context, keyID string, since time.Ti
 		limit = 100
 	}
 	q := r.db.rebind(`
-		SELECT id, provider, model, prompt_tokens, completion_tokens, cached_tokens,
-		       cache_write_tokens, cost_micros, cache_hit, latency_ms, ttft_ms,
-		       slim_bytes_saved, slim_tokens_saved, slim_rules, slim_active, caveman_active, terse_active,
-		       headroom_tokens_saved, headroom_bytes_saved, headroom_active, ponytail_active,
-		       created_at
+		SELECT id, CASE WHEN public_model IS NULL OR public_model = '' THEN 'legacy' ELSE public_model END,
+		       prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens, cost_micros,
+		       cache_hit, latency_ms, ttft_ms, slim_bytes_saved, slim_tokens_saved, slim_rules,
+		       slim_active, caveman_active, terse_active, headroom_tokens_saved, headroom_bytes_saved,
+		       headroom_active, ponytail_active, created_at
 		FROM usage_records
 		WHERE api_key_id = ? AND created_at >= ?
 		ORDER BY created_at DESC
@@ -816,9 +814,8 @@ func (r *UsageRepo) RecentByKey(ctx context.Context, keyID string, since time.Ti
 			slimActive                     int
 			createdAt                      string
 		)
-		if err := rows.Scan(&rec.ID, &rec.Provider, &rec.Model, &rec.PromptTokens,
-			&rec.CompletionTokens, &rec.CachedTokens, &rec.CacheWriteTokens,
-			&rec.CostMicros, &cacheHit, &rec.LatencyMS, &rec.TTFTMS,
+		if err := rows.Scan(&rec.ID, &rec.Model, &rec.PromptTokens, &rec.CompletionTokens,
+			&rec.CachedTokens, &rec.CacheWriteTokens, &rec.CostMicros, &cacheHit, &rec.LatencyMS, &rec.TTFTMS,
 			&rec.SlimBytesSaved, &rec.SlimTokensSaved, &rec.SlimRules, &slimActive, &caveman, &terse,
 			&rec.HeadroomTokensSaved, &rec.HeadroomBytesSaved, &headroomActive, &ponytailActive,
 			&createdAt); err != nil {

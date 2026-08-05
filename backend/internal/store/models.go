@@ -134,9 +134,10 @@ type UsageRecord struct {
 	ProjectID string
 	APIKeyID  string
 
-	Provider  string
-	Model     string
-	AccountID string
+	Provider    string
+	Model       string
+	PublicModel string
+	AccountID   string
 	Client    string // detected calling tool (claude-code, codex, ...) or "unknown"
 	Status    string // success | cache_hit | blocked | failed | cancelled
 	ErrorKind string

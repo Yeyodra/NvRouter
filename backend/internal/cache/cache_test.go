@@ -16,10 +16,17 @@ func resp(text string) *core.ChatResponse {
 	}
 }
 
+func testEntry(key string, vec []float32, response *core.ChatResponse) Entry {
+	return Entry{
+		Key: key, Vector: vec, Response: response,
+		Provider: "openai", Model: "gpt-4o", AccountID: "account-1",
+	}
+}
+
 func TestCache_Disabled(t *testing.T) {
 	c := New(Config{Enabled: false}, nil)
-	require.NoError(t, c.Store(context.Background(), []float32{1, 0}, resp("hi")))
-	_, ok, err := c.Lookup(context.Background(), []float32{1, 0})
+	require.NoError(t, c.Store(context.Background(), testEntry("key", []float32{1, 0}, resp("hi"))))
+	_, ok, err := c.Lookup(context.Background(), "key", []float32{1, 0})
 	require.NoError(t, err)
 	require.False(t, ok)
 }
@@ -27,42 +34,55 @@ func TestCache_Disabled(t *testing.T) {
 func TestCache_HitOnIdenticalVector(t *testing.T) {
 	c := New(Config{Enabled: true, SimilarityThreshold: 0.95, TTL: time.Hour}, nil)
 	vec := []float32{0.1, 0.9, 0.3}
-	require.NoError(t, c.Store(context.Background(), vec, resp("cached answer")))
+	require.NoError(t, c.Store(context.Background(), testEntry("key", vec, resp("cached answer"))))
 
-	got, ok, err := c.Lookup(context.Background(), vec)
+	got, ok, err := c.Lookup(context.Background(), "key", vec)
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.Equal(t, "cached answer", got.Message.TextContent())
+	require.Equal(t, "cached answer", got.Response.Message.TextContent())
+	require.Equal(t, "openai", got.Provider)
+	require.Equal(t, "gpt-4o", got.Model)
+	require.Equal(t, "account-1", got.AccountID)
+}
+
+func TestCache_SameVectorDifferentKeyMisses(t *testing.T) {
+	c := New(Config{Enabled: true, SimilarityThreshold: 0.95, TTL: time.Hour}, nil)
+	vec := []float32{0.1, 0.9, 0.3}
+	require.NoError(t, c.Store(context.Background(), testEntry("tenant-a/key-a/route-a", vec, resp("private"))))
+
+	_, ok, err := c.Lookup(context.Background(), "tenant-b/key-b/route-a", vec)
+	require.NoError(t, err)
+	require.False(t, ok)
 }
 
 func TestCache_MissBelowThreshold(t *testing.T) {
 	c := New(Config{Enabled: true, SimilarityThreshold: 0.99, TTL: time.Hour}, nil)
-	require.NoError(t, c.Store(context.Background(), []float32{1, 0, 0}, resp("x")))
+	require.NoError(t, c.Store(context.Background(), testEntry("key", []float32{1, 0, 0}, resp("x"))))
 
 	// Orthogonal vector -> cosine 0, well below threshold.
-	_, ok, err := c.Lookup(context.Background(), []float32{0, 1, 0})
+	_, ok, err := c.Lookup(context.Background(), "key", []float32{0, 1, 0})
 	require.NoError(t, err)
 	require.False(t, ok)
 }
 
 func TestCache_NearMatchHits(t *testing.T) {
 	c := New(Config{Enabled: true, SimilarityThreshold: 0.95, TTL: time.Hour}, nil)
-	require.NoError(t, c.Store(context.Background(), []float32{1, 0, 0}, resp("near")))
+	require.NoError(t, c.Store(context.Background(), testEntry("key", []float32{1, 0, 0}, resp("near"))))
 
 	// Slightly perturbed but highly similar vector.
-	got, ok, err := c.Lookup(context.Background(), []float32{0.99, 0.05, 0.02})
+	got, ok, err := c.Lookup(context.Background(), "key", []float32{0.99, 0.05, 0.02})
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.Equal(t, "near", got.Message.TextContent())
+	require.Equal(t, "near", got.Response.Message.TextContent())
 }
 
 func TestCache_TTLExpiry(t *testing.T) {
 	c := New(Config{Enabled: true, SimilarityThreshold: 0.9, TTL: time.Millisecond}, nil)
 	vec := []float32{1, 1}
-	require.NoError(t, c.Store(context.Background(), vec, resp("stale")))
+	require.NoError(t, c.Store(context.Background(), testEntry("key", vec, resp("stale"))))
 	time.Sleep(5 * time.Millisecond)
 
-	_, ok, err := c.Lookup(context.Background(), vec)
+	_, ok, err := c.Lookup(context.Background(), "key", vec)
 	require.NoError(t, err)
 	require.False(t, ok, "expired entry must be a miss")
 }
@@ -71,7 +91,9 @@ func TestMemoryStore_Eviction(t *testing.T) {
 	store := NewMemoryStore(2, 0)
 	ctx := context.Background()
 	for i := 0; i < 5; i++ {
-		require.NoError(t, store.Put(ctx, Entry{Vector: []float32{float32(i)}, StoredAt: time.Now().Add(time.Duration(i) * time.Millisecond)}))
+		entry := testEntry("key", []float32{float32(i)}, resp("cached"))
+		entry.StoredAt = time.Now().Add(time.Duration(i) * time.Millisecond)
+		require.NoError(t, store.Put(ctx, entry))
 	}
 	require.LessOrEqual(t, store.Len(), 2, "store must respect max capacity")
 }

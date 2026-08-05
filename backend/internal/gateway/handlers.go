@@ -79,6 +79,7 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 // Anthropic response shape: {"input_tokens": N}. The estimate uses the common
 // ~4 chars/token rule, which is accurate enough for client-side budgeting.
 func (s *Server) handleAnthropicCountTokens(w http.ResponseWriter, r *http.Request) {
+	key, _ := authedKey(r.Context())
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "failed to read request body")
@@ -93,6 +94,14 @@ func (s *Server) handleAnthropicCountTokens(w http.ResponseWriter, r *http.Reque
 	req, err := codec.ParseRequest(body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request: "+err.Error())
+		return
+	}
+	if err := s.authorizeRequestedModel(r.Context(), key.ID, req.Model); err != nil {
+		if _, denied := err.(accessDeniedError); denied {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "model access check failed")
 		return
 	}
 
@@ -156,6 +165,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request, dialect core
 		ClientKind:    client,
 		SourceDialect: dialect,
 		APIKeyID:      key.ID,
+		PublicModel:   req.Model,
 		TenantID:      tenantID,
 		ProjectID:     key.ProjectID,
 		RequestID:     chimiddleware.GetReqID(r.Context()),
@@ -283,7 +293,9 @@ func (s *Server) unaryChat(w http.ResponseWriter, r *http.Request, codec transfo
 		return
 	}
 
-	out, err := codec.RenderResponse(result.Response)
+	response := *result.Response
+	response.Model = req.Model
+	out, err := codec.RenderResponse(&response)
 	if err != nil {
 		s.consoleLog.Log("ERROR", "Failed to render provider response", err.Error())
 		writeError(w, http.StatusInternalServerError, "failed to render response")
@@ -296,8 +308,6 @@ func (s *Server) unaryChat(w http.ResponseWriter, r *http.Request, codec transfo
 			result.Provider, result.Model, humanInt(tokens), result.AccountID, result.CacheHit, latency))
 	s.logRequest(keyName, result.Provider, result.Model, tokens, result.CostMicros, latency, result.CacheHit, nil)
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-KeiRouter-Provider", result.Provider)
-	w.Header().Set("X-KeiRouter-Model", result.Model)
 	if result.CacheHit {
 		w.Header().Set("X-KeiRouter-Cache", "hit")
 	}
@@ -341,8 +351,6 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, codec transf
 	}
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-KeiRouter-Provider", result.Provider)
-	w.Header().Set("X-KeiRouter-Model", result.Model)
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
@@ -369,7 +377,7 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, codec transf
 			dst = hw
 			frameFlush = nil // the heartbeat writer flushes after every frame
 		}
-		n, cpErr := copySanitizedStream(dst, result.DirectBody, req.Metadata.SourceDialect, frameFlush)
+		n, cpErr := copyProjectedStream(dst, result.DirectBody, req.Metadata.SourceDialect, req.Model, frameFlush)
 		if hw != nil {
 			hw.stop()
 		}
@@ -405,7 +413,7 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, codec transf
 	defer core.SSEWriterPool.Put(bw)
 	bw.Reset(w)
 
-	state := &transform.StreamState{Model: result.Model}
+	state := &transform.StreamState{Model: req.Model}
 	transform.ResetStreamState(state)
 	streamStart := time.Now()
 	var streamUsage core.Usage
@@ -640,12 +648,15 @@ type streamWriteError struct{ err error }
 func (e *streamWriteError) Error() string { return e.err.Error() }
 func (e *streamWriteError) Unwrap() error { return e.err }
 
-// copySanitizedStream keeps the direct-stream path lightweight by framing SSE
-// events without decoding successful chunks. Only potential error events are
-// decoded; those are replaced with a dialect-compatible generic event.
+// copySanitizedStream frames direct streams and replaces potential provider
+// errors with a dialect-compatible generic event.
 func copySanitizedStream(dst io.Writer, src io.Reader, dialect core.Dialect, flush func()) (int64, error) {
+	return copyProjectedStream(dst, src, dialect, "", flush)
+}
+
+func copyProjectedStream(dst io.Writer, src io.Reader, dialect core.Dialect, publicModel string, flush func()) (int64, error) {
 	reader := bufio.NewReaderSize(src, 64*1024)
-	state := streamFrameState{dialect: dialect}
+	state := streamFrameState{dialect: dialect, publicModel: publicModel}
 	if dialect == core.DialectOllama {
 		return copySanitizedNDJSON(dst, reader, dialect, flush, &state)
 	}
@@ -660,6 +671,9 @@ func copySanitizedStream(dst io.Writer, src io.Reader, dialect core.Dialect, flu
 				n, err := writeSanitizedFrame(dst, event.Bytes(), dialect, flush, &state)
 				written += n
 				if err != nil {
+					if n == 0 && core.AsProviderError(err).Kind == core.ErrResponseIntegrity {
+						return writeIntegrityFailure(dst, dialect, flush, written, err)
+					}
 					return written, err
 				}
 				event.Reset()
@@ -672,26 +686,12 @@ func copySanitizedStream(dst io.Writer, src io.Reader, dialect core.Dialect, flu
 			return written, &streamReadError{err: readErr}
 		}
 		if event.Len() > 0 {
-			integrityErr := responseIntegrityError("provider stream ended with a truncated frame")
-			if dialect == core.DialectOpenAIResponses {
-				n, err := writeResponsesFailure(dst, integrityErr.Error(), flush)
-				written += n
-				if err != nil {
-					return written, err
-				}
-			}
-			return written, integrityErr
+			return writeIntegrityFailure(dst, dialect, flush, written,
+				responseIntegrityError("provider stream ended with a truncated frame"))
 		}
 		if !state.terminal {
-			integrityErr := responseIntegrityError("provider stream ended without a terminal event")
-			if dialect == core.DialectOpenAIResponses {
-				n, err := writeResponsesFailure(dst, integrityErr.Error(), flush)
-				written += n
-				if err != nil {
-					return written, err
-				}
-			}
-			return written, integrityErr
+			return writeIntegrityFailure(dst, dialect, flush, written,
+				responseIntegrityError("provider stream ended without a terminal event"))
 		}
 		n, err := state.flushTerminal(dst, flush)
 		return written + n, err
@@ -743,9 +743,10 @@ func copySanitizedNDJSON(dst io.Writer, reader *bufio.Reader, dialect core.Diale
 }
 
 type streamFrameState struct {
-	dialect  core.Dialect
-	terminal bool
-	pending  []byte
+	dialect     core.Dialect
+	publicModel string
+	terminal    bool
+	pending     []byte
 }
 
 func (s *streamFrameState) flushTerminal(dst io.Writer, flush func()) (int64, error) {
@@ -767,6 +768,29 @@ func (s *streamFrameState) flushTerminal(dst io.Writer, flush func()) (int64, er
 
 func responseIntegrityError(message string) error {
 	return &core.ProviderError{Kind: core.ErrResponseIntegrity, Message: message, Cause: errors.New(message)}
+}
+
+func writeIntegrityFailure(dst io.Writer, dialect core.Dialect, flush func(), written int64, cause error) (int64, error) {
+	var out []byte
+	if dialect == core.DialectOpenAIResponses {
+		n, err := writeResponsesFailure(dst, "upstream provider response was invalid", flush)
+		if err != nil {
+			return written + n, err
+		}
+		return written + n, cause
+	}
+	out = streamErrorEvent(dialect, "upstream provider response was invalid")
+	n, err := dst.Write(out)
+	if flush != nil {
+		flush()
+	}
+	if err == nil && n != len(out) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		return written + int64(n), &streamWriteError{err: err}
+	}
+	return written + int64(n), cause
 }
 
 func writeResponsesFailure(dst io.Writer, message string, flush func()) (int64, error) {
@@ -796,22 +820,35 @@ func writeSanitizedFrame(dst io.Writer, raw []byte, dialect core.Dialect, flush 
 	if err != nil {
 		return 0, err
 	}
+	providerErr := hasStreamErrorMarker(payload) && isProviderStreamError(string(raw))
+	out := raw
+	if providerErr {
+		if dialect == core.DialectOpenAIResponses {
+			var buf bytes.Buffer
+			if _, err := writeResponsesFailure(&buf, "upstream provider request failed", nil); err != nil {
+				return 0, err
+			}
+			out = buf.Bytes()
+		} else {
+			out = streamErrorEvent(dialect, "upstream provider request failed")
+		}
+	} else if state.publicModel != "" && len(payload) > 0 && !bytes.Equal(payload, []byte("[DONE]")) {
+		out, err = projectStreamFrame(raw, payload, dialect, state.publicModel)
+		if err != nil {
+			return 0, err
+		}
+	}
 	if state.terminal && len(payload) > 0 && !done {
 		if !isUsageOnlyFrame(payload) {
 			return 0, responseIntegrityError("provider stream contained content after a terminal event")
 		}
-		state.pending = append(state.pending, raw...)
+		state.pending = append(state.pending, out...)
 		return 0, nil
 	}
-	providerErr := hasStreamErrorMarker(payload) && isProviderStreamError(string(raw))
 	if done && !providerErr {
 		state.terminal = true
-		state.pending = append(state.pending[:0], raw...)
+		state.pending = append(state.pending[:0], out...)
 		return 0, nil
-	}
-	out := raw
-	if providerErr && dialect != core.DialectOpenAIResponses {
-		out = streamErrorEvent(dialect, "upstream provider request failed")
 	}
 	n, err := dst.Write(out)
 	if err == nil && n != len(out) {
@@ -831,6 +868,54 @@ func writeSanitizedFrame(dst io.Writer, raw []byte, dialect core.Dialect, flush 
 		}
 	}
 	return int64(n), nil
+}
+
+func projectStreamFrame(raw, payload []byte, dialect core.Dialect, publicModel string) ([]byte, error) {
+	var value any
+	if err := json.Unmarshal(payload, &value); err != nil {
+		return nil, responseIntegrityError("provider stream contained malformed JSON")
+	}
+	projectModelFields(value, publicModel)
+	projected, err := json.Marshal(value)
+	if err != nil {
+		return nil, responseIntegrityError("provider stream contained invalid JSON")
+	}
+	if dialect == core.DialectOllama {
+		return append(projected, '\n'), nil
+	}
+
+	var out bytes.Buffer
+	wroteData := false
+	for _, line := range bytes.SplitAfter(raw, []byte("\n")) {
+		if strings.HasPrefix(strings.TrimSpace(string(line)), "data:") {
+			if !wroteData {
+				out.WriteString("data: ")
+				out.Write(projected)
+				out.WriteByte('\n')
+				wroteData = true
+			}
+			continue
+		}
+		out.Write(line)
+	}
+	return out.Bytes(), nil
+}
+
+func projectModelFields(value any, publicModel string) {
+	switch value := value.(type) {
+	case map[string]any:
+		for key, child := range value {
+			if key == "model" {
+				value[key] = publicModel
+				continue
+			}
+			projectModelFields(child, publicModel)
+		}
+	case []any:
+		for _, child := range value {
+			projectModelFields(child, publicModel)
+		}
+	}
 }
 
 func validateStreamFrame(raw []byte, dialect core.Dialect) ([]byte, bool, error) {
@@ -872,7 +957,15 @@ func validateStreamFrame(raw []byte, dialect core.Dialect) ([]byte, bool, error)
 			}
 		}
 	case core.DialectOpenAIResponses:
-		terminal = typeName == "response.completed" || typeName == "response.failed" || typeName == "error"
+		terminal = typeName == "response.failed" || typeName == "error"
+		if typeName == "response.completed" {
+			response, ok := envelope["response"].(map[string]any)
+			status, statusOK := response["status"].(string)
+			if !ok || !statusOK || status != "completed" || hasJSONValue(response["error"]) || hasJSONValue(response["incomplete_details"]) {
+				return nil, false, responseIntegrityError("provider stream contained malformed response.completed")
+			}
+			terminal = true
+		}
 		if typeName == "response.incomplete" {
 			response, ok := envelope["response"].(map[string]any)
 			details, detailsOK := response["incomplete_details"].(map[string]any)
@@ -895,6 +988,8 @@ func validateStreamFrame(raw []byte, dialect core.Dialect) ([]byte, bool, error)
 	}
 	return payload, terminal, nil
 }
+
+func hasJSONValue(value any) bool { return value != nil }
 
 func isUsageOnlyFrame(payload []byte) bool {
 	var envelope map[string]json.RawMessage
@@ -1186,9 +1281,8 @@ func (s *Server) handleKeyUsage(w http.ResponseWriter, r *http.Request) {
 	var modelOut []map[string]any
 	for _, m := range models {
 		modelOut = append(modelOut, map[string]any{
-			"provider": m.Provider, "model": m.Model,
-			"total_requests": m.TotalRequests,
-			"prompt_tokens":  m.PromptTokens, "completion_tokens": m.CompletionTokens,
+			"model": m.Model, "total_requests": m.TotalRequests,
+			"prompt_tokens": m.PromptTokens, "completion_tokens": m.CompletionTokens,
 			"cost_usd": float64(m.CostMicros) / 1_000_000,
 		})
 	}
@@ -1334,7 +1428,6 @@ func (s *Server) handlePortalKeyUsage(w http.ResponseWriter, r *http.Request) {
 	var modelOut []map[string]any
 	for _, m := range models {
 		modelOut = append(modelOut, map[string]any{
-			"provider":          m.Provider,
 			"model":             m.Model,
 			"total_requests":    m.TotalRequests,
 			"prompt_tokens":     m.PromptTokens,
@@ -1349,7 +1442,6 @@ func (s *Server) handlePortalKeyUsage(w http.ResponseWriter, r *http.Request) {
 	for _, rec := range recent {
 		entry := map[string]any{
 			"id":                rec.ID,
-			"provider":          rec.Provider,
 			"model":             rec.Model,
 			"prompt_tokens":     rec.PromptTokens,
 			"completion_tokens": rec.CompletionTokens,

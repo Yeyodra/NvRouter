@@ -22,6 +22,9 @@ func TestCopySanitizedStreamRejectsMalformedFrameBeforeEOF(t *testing.T) {
 	if strings.Contains(out.String(), "{bad") {
 		t.Fatalf("malformed frame was forwarded: %q", out.String())
 	}
+	if !strings.Contains(out.String(), `"type":"upstream_error"`) {
+		t.Fatalf("output = %q, want sanitized OpenAI error", out.String())
+	}
 }
 
 func TestCopySanitizedStreamRejectsMissingTerminal(t *testing.T) {
@@ -33,6 +36,9 @@ func TestCopySanitizedStreamRejectsMissingTerminal(t *testing.T) {
 	var pe *core.ProviderError
 	if !errors.As(err, &pe) || pe.Kind != core.ErrResponseIntegrity {
 		t.Fatalf("error = %v, want response-integrity ProviderError", err)
+	}
+	if !strings.Contains(out.String(), `"type":"upstream_error"`) {
+		t.Fatalf("output = %q, want sanitized OpenAI error", out.String())
 	}
 }
 
@@ -86,38 +92,37 @@ func TestCopySanitizedStreamRejectsContentAfterTerminalButAllowsUsage(t *testing
 	}
 }
 
-func TestCopySanitizedResponsesPreservesNativeTerminalOutcomes(t *testing.T) {
-	for _, tt := range []struct {
-		name  string
-		input string
-	}{
-		{
-			name:  "failed",
-			input: "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_native\",\"status\":\"failed\",\"error\":{\"type\":\"server_error\",\"code\":\"native_code\",\"message\":\"native message\"}}}\n\n",
-		},
-		{
-			name:  "incomplete",
-			input: "event: response.incomplete\ndata: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_native\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n",
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			var out bytes.Buffer
-			_, err := copySanitizedStream(&out, strings.NewReader(tt.input), core.DialectOpenAIResponses, nil)
-			if tt.name == "failed" {
-				var pe *core.ProviderError
-				if !errors.As(err, &pe) || pe.Kind != core.ErrUpstream {
-					t.Fatalf("error = %v, want upstream ProviderError", err)
-				}
-			} else if err != nil {
-				t.Fatalf("copySanitizedStream() error = %v", err)
-			}
-			if out.String() != tt.input {
-				t.Fatalf("output = %q, want native event %q", out.String(), tt.input)
-			}
-			if strings.Contains(out.String(), "response.completed") || strings.Contains(out.String(), `data: {\"error\"`) {
-				t.Fatalf("native terminal was contradicted or replaced: %q", out.String())
-			}
-		})
+func TestCopySanitizedResponsesSanitizesNativeFailure(t *testing.T) {
+	input := "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_native\",\"status\":\"failed\",\"error\":{\"type\":\"server_error\",\"code\":\"native_code\",\"message\":\"native message\"}}}\n\n"
+	var out bytes.Buffer
+
+	_, err := copySanitizedStream(&out, strings.NewReader(input), core.DialectOpenAIResponses, nil)
+	var pe *core.ProviderError
+	if !errors.As(err, &pe) || pe.Kind != core.ErrUpstream {
+		t.Fatalf("error = %v, want upstream ProviderError", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "event: response.failed\n") || !strings.Contains(got, `"message":"upstream provider request failed"`) {
+		t.Fatalf("output = %q, want generic response.failed", got)
+	}
+	if strings.Contains(got, "resp_native") || strings.Contains(got, "native_code") || strings.Contains(got, "native message") {
+		t.Fatalf("output exposed upstream failure detail: %q", got)
+	}
+	if !strings.Contains(pe.Error(), "native message") || pe.Cause == nil || !strings.Contains(pe.Cause.Error(), "native message") {
+		t.Fatalf("internal error lost upstream detail: %#v", pe)
+	}
+}
+
+func TestCopySanitizedResponsesPreservesNativeIncomplete(t *testing.T) {
+	input := "event: response.incomplete\ndata: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_native\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n"
+	var out bytes.Buffer
+
+	_, err := copySanitizedStream(&out, strings.NewReader(input), core.DialectOpenAIResponses, nil)
+	if err != nil {
+		t.Fatalf("copySanitizedStream() error = %v", err)
+	}
+	if out.String() != input {
+		t.Fatalf("output = %q, want native event %q", out.String(), input)
 	}
 }
 
@@ -184,7 +189,11 @@ func TestCopySanitizedResponsesRejectsMalformedIncomplete(t *testing.T) {
 	if !errors.As(err, &pe) || pe.Kind != core.ErrResponseIntegrity {
 		t.Fatalf("error = %v, want response-integrity ProviderError", err)
 	}
-	if out.Len() != 0 {
-		t.Fatalf("malformed incomplete was forwarded: %q", out.String())
+	got := out.String()
+	if !strings.Contains(got, "event: response.failed\n") || !strings.Contains(got, "upstream provider response was invalid") {
+		t.Fatalf("output = %q, want generic response.failed", got)
+	}
+	if strings.Contains(got, `"status":"incomplete"`) {
+		t.Fatalf("malformed incomplete was forwarded: %q", got)
 	}
 }

@@ -2,11 +2,9 @@ package cache
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"math"
 	"time"
 
 	"github.com/mydisha/keirouter/backend/internal/core"
@@ -74,11 +72,9 @@ func (s *RedisStore) indexKey() string {
 }
 
 // Nearest returns the entry whose vector has the highest cosine similarity to vec.
-func (s *RedisStore) Nearest(ctx context.Context, vec []float32) (Entry, float64, bool, error) {
-	// Identical prompts produce an identical vector key. This O(1) path handles
-	// the default hash embedder and repeated semantic prompts without loading
-	// the entire cache index and every stored response over the network.
-	exactData, err := s.client.HGetAll(ctx, entryKey(s.keyPrefix, vec)).Result()
+func (s *RedisStore) Nearest(ctx context.Context, requestKey string, vec []float32) (Entry, float64, bool, error) {
+	// Identical requests use the exact semantics key without scanning the index.
+	exactData, err := s.client.HGetAll(ctx, entryKey(s.keyPrefix, requestKey)).Result()
 	if err != nil && err != redis.Nil {
 		return Entry{}, 0, false, fmt.Errorf("cache: redis exact lookup: %w", err)
 	}
@@ -124,6 +120,9 @@ func (s *RedisStore) Nearest(ctx context.Context, vec []float32) (Entry, float64
 			staleKeys = append(staleKeys, key)
 			continue
 		}
+		if data["request_key"] != requestKey {
+			continue
+		}
 
 		var entryVec []float32
 		if err := json.Unmarshal([]byte(data["vector"]), &entryVec); err != nil {
@@ -142,9 +141,8 @@ func (s *RedisStore) Nearest(ctx context.Context, vec []float32) (Entry, float64
 			storedAt, _ := time.Parse(time.RFC3339, data["stored_at"])
 
 			best = Entry{
-				Vector:   entryVec,
-				Response: &resp,
-				Model:    data["model"],
+				Key: data["request_key"], Vector: entryVec, Response: &resp,
+				Provider: data["provider"], Model: data["model"], AccountID: data["account_id"],
 				StoredAt: storedAt,
 			}
 		}
@@ -182,7 +180,11 @@ func decodeRedisEntry(data map[string]string) (Entry, error) {
 	if err != nil {
 		return Entry{}, fmt.Errorf("decode stored_at: %w", err)
 	}
-	return Entry{Vector: vec, Response: &resp, Model: data["model"], StoredAt: storedAt}, nil
+	return Entry{
+		Key: data["request_key"], Vector: vec, Response: &resp,
+		Provider: data["provider"], Model: data["model"], AccountID: data["account_id"],
+		StoredAt: storedAt,
+	}, nil
 }
 
 // Put inserts a cache entry into Redis with the configured TTL.
@@ -196,12 +198,12 @@ func (s *RedisStore) Put(ctx context.Context, e Entry) error {
 		return fmt.Errorf("cache: marshal response: %w", err)
 	}
 
-	key := entryKey(s.keyPrefix, e.Vector)
+	key := entryKey(s.keyPrefix, e.Key)
 
 	fields := map[string]interface{}{
-		"vector":    string(vecJSON),
-		"response":  string(respJSON),
-		"model":     e.Model,
+		"request_key": e.Key,
+		"vector": string(vecJSON), "response": string(respJSON),
+		"provider": e.Provider, "model": e.Model, "account_id": e.AccountID,
 		"stored_at": e.StoredAt.Format(time.RFC3339),
 	}
 
@@ -232,13 +234,4 @@ func (s *RedisStore) Close() error {
 	return s.client.Close()
 }
 
-// entryKey produces a deterministic Redis key from the vector content. Two
-// identical vectors produce the same key (natural dedup for cache entries).
-// Collisions just overwrite, which is fine for a cache.
-func entryKey(prefix string, vec []float32) string {
-	var buf [64]byte
-	for i := 0; i < 16 && i < len(vec); i++ {
-		binary.LittleEndian.PutUint32(buf[i*4:], math.Float32bits(vec[i]))
-	}
-	return fmt.Sprintf("%s%x", prefix, buf[:])
-}
+func entryKey(prefix, requestKey string) string { return prefix + requestKey }

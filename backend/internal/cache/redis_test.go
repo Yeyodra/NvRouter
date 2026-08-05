@@ -9,17 +9,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestEntryKey_Deterministic(t *testing.T) {
-	vec := []float32{0.1, 0.2, 0.3, 0.4, 0.5}
-	k1 := entryKey("test:", vec)
-	k2 := entryKey("test:", vec)
-	require.Equal(t, k1, k2, "same vector must produce same key")
-}
-
-func TestEntryKey_DifferentVectors(t *testing.T) {
-	k1 := entryKey("test:", []float32{1, 0, 0})
-	k2 := entryKey("test:", []float32{0, 1, 0})
-	require.NotEqual(t, k1, k2, "different vectors should produce different keys")
+func TestEntryKey(t *testing.T) {
+	require.Equal(t, "test:request-key", entryKey("test:", "request-key"))
+	require.NotEqual(t, entryKey("test:", "first"), entryKey("test:", "second"))
 }
 
 func TestCacheResponseRoundtrip(t *testing.T) {
@@ -52,6 +44,7 @@ func TestCacheResponseRoundtrip(t *testing.T) {
 
 func TestCacheEntrySerialization(t *testing.T) {
 	entry := Entry{
+		Key:    "request-key",
 		Vector: []float32{0.1, 0.2, 0.3},
 		Response: &core.ChatResponse{
 			ID:    "test-id",
@@ -61,8 +54,10 @@ func TestCacheEntrySerialization(t *testing.T) {
 				Content: []core.ContentPart{{Type: core.PartText, Text: "cached"}},
 			},
 		},
-		Model:    "claude-sonnet-4.5",
-		StoredAt: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		Provider:  "anthropic",
+		Model:     "claude-sonnet-4.5",
+		AccountID: "account-1",
+		StoredAt:  time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
 	}
 
 	// Simulate what RedisStore.Put does.

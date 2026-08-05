@@ -211,21 +211,25 @@ func (p *Pipeline) Chat(ctx context.Context, req *core.ChatRequest, opts Options
 	// request, so cache keys are stable across slimmer/terse settings. Cached
 	// hits cost nothing and skip the upstream entirely.
 	vec := p.embedPrompt(ctx, req)
-	if hit, ok := p.cacheLookup(ctx, vec); ok {
+	if hit, ok := p.cacheLookup(ctx, req, vec); ok {
 		p.log.Debug("cache hit, skipping upstream")
 		scope := budget.Scope{TenantID: req.Metadata.TenantID, ProjectID: req.Metadata.ProjectID, APIKeyID: req.Metadata.APIKeyID}
 		p.budgetRelease(scope)
 		attempt := attemptForTargets(opts.Targets)
+		if hit.Provider != "" {
+			attempt.Target.Provider = hit.Provider
+		}
 		if hit.Model != "" {
 			attempt.Target.Model = hit.Model
 		}
-		usage := hit.Usage
+		attempt.Account.ID = hit.AccountID
+		usage := hit.Response.Usage
 		usage.Source = core.UsageSourceCache
 		cost := p.recordOutcomeWithTTFT(ctx, req.Metadata, attempt, usage, "cache_hit", "", true,
 			0, time.Since(requestStarted), 0, nil)
 		return &Result{
-			Response: hit, Provider: attempt.Target.Provider, Model: attempt.Target.Model,
-			CostMicros: cost, CacheHit: true,
+			Response: hit.Response, Provider: attempt.Target.Provider, Model: attempt.Target.Model,
+			AccountID: attempt.Account.ID, CostMicros: cost, CacheHit: true,
 		}, nil
 	}
 	if p.metrics != nil && p.cache != nil && p.cache.Enabled() {
@@ -441,7 +445,7 @@ func (p *Pipeline) Chat(ctx context.Context, req *core.ChatRequest, opts Options
 
 		cost := p.recordWithEndToEnd(ctx, req.Metadata, attempt, resp.Usage, false,
 			latency, time.Since(requestStarted), save, fellBack)
-		p.cacheStore(ctx, vec, resp)
+		p.cacheStore(ctx, req, vec, resp, attempt)
 		// Confirm budget reservation — usage is now recorded in DB.
 		p.budgetConfirm(scope, cost)
 		p.log.Debug("attempt success", "provider", attempt.Target.Provider,
@@ -1729,6 +1733,7 @@ func (p *Pipeline) recordOutcomeWithTTFT(ctx context.Context, meta core.RequestM
 		APIKeyID:        meta.APIKeyID,
 		Provider:        attempt.Target.Provider,
 		Model:           attempt.Target.Model,
+		PublicModel:     meta.PublicModel,
 		AccountID:       attempt.Account.ID,
 		Client:          meta.ClientKind,
 		Status:          status,
@@ -1800,24 +1805,27 @@ func (p *Pipeline) embedPrompt(ctx context.Context, req *core.ChatRequest) []flo
 }
 
 // cacheLookup checks the semantic cache for a stored response.
-func (p *Pipeline) cacheLookup(ctx context.Context, vec []float32) (*core.ChatResponse, bool) {
+func (p *Pipeline) cacheLookup(ctx context.Context, req *core.ChatRequest, vec []float32) (cache.Entry, bool) {
 	if p.cache == nil || len(vec) == 0 {
-		return nil, false
+		return cache.Entry{}, false
 	}
-	resp, ok, err := p.cache.Lookup(ctx, vec)
+	entry, ok, err := p.cache.Lookup(ctx, cache.RequestKey(req), vec)
 	if err != nil {
 		p.log.Warn("cache lookup failed", "err", err)
-		return nil, false
+		return cache.Entry{}, false
 	}
-	return resp, ok
+	return entry, ok
 }
 
 // cacheStore caches a successful response under its prompt vector.
-func (p *Pipeline) cacheStore(ctx context.Context, vec []float32, resp *core.ChatResponse) {
+func (p *Pipeline) cacheStore(ctx context.Context, req *core.ChatRequest, vec []float32, resp *core.ChatResponse, attempt dispatch.Attempt) {
 	if p.cache == nil || len(vec) == 0 {
 		return
 	}
-	if err := p.cache.Store(ctx, vec, resp); err != nil {
+	if err := p.cache.Store(ctx, cache.Entry{
+		Key: cache.RequestKey(req), Vector: vec, Response: resp,
+		Provider: attempt.Target.Provider, Model: attempt.Target.Model, AccountID: attempt.Account.ID,
+	}); err != nil {
 		p.log.Warn("cache store failed", "err", err)
 	}
 }

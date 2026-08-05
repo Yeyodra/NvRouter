@@ -52,6 +52,7 @@ func TestForbiddenRequestedRouteReturns403AcrossPublicEndpoints(t *testing.T) {
 	}{
 		{"chat", "/v1/chat/completions", `{"model":"not-a-route","messages":[{"role":"user","content":"hello"}]}`},
 		{"responses", "/v1/responses", `{"model":"not-a-route","input":"hello"}`},
+		{"count tokens", "/v1/messages/count_tokens", `{"model":"not-a-route","messages":[{"role":"user","content":"hello"}]}`},
 		{"gemini", "/v1beta/models/not-a-route:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`},
 		{"embeddings", "/v1/embeddings", `{"model":"not-a-route","input":"hello"}`},
 		{"images", "/v1/images/generations", `{"model":"not-a-route","prompt":"hello"}`},

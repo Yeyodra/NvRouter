@@ -4,7 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
-	"strings"
+	"encoding/hex"
+	"encoding/json"
 
 	"github.com/mydisha/keirouter/backend/internal/core"
 )
@@ -14,31 +15,42 @@ type Embedder interface {
 	Embed(ctx context.Context, text string) ([]float32, error)
 }
 
-// PromptText extracts a stable, normalized prompt string from a request for
-// embedding. It concatenates system text and message text in order; tool-call
-// and binary parts are ignored so cache keys stay text-stable.
+// PromptText returns a deterministic representation of every request field that
+// can affect a non-streaming response. Router-only request IDs and affinity are
+// intentionally excluded.
 func PromptText(req *core.ChatRequest) string {
-	var b strings.Builder
-	if req.System != "" {
-		b.WriteString(req.System)
-		b.WriteByte('\n')
+	if req == nil {
+		return "null"
 	}
-	for _, m := range req.Messages {
-		b.WriteString(string(m.Role))
-		b.WriteByte(':')
-		for _, p := range m.Content {
-			switch p.Type {
-			case core.PartText:
-				b.WriteString(p.Text)
-			case core.PartToolResult:
-				if p.ToolResult != nil {
-					b.WriteString(p.ToolResult.Content)
-				}
-			}
-		}
-		b.WriteByte('\n')
+	input := struct {
+		TenantID, ProjectID, APIKeyID, PublicModel string
+		Model                                      string
+		System                                     string
+		Messages                                   []core.Message
+		Tools                                      []core.Tool
+		ToolChoice                                 any
+		Temperature, TopP                          *float64
+		MaxTokens                                  *int
+		Stop                                       []string
+		Reasoning                                  *core.ReasoningConfig
+		ResponseFormat                             json.RawMessage
+		Extra                                      map[string]json.RawMessage
+	}{
+		TenantID: req.Metadata.TenantID, ProjectID: req.Metadata.ProjectID,
+		APIKeyID: req.Metadata.APIKeyID, PublicModel: req.Metadata.PublicModel,
+		Model: req.Model, System: req.System, Messages: req.Messages, Tools: req.Tools,
+		ToolChoice: req.ToolChoice, Temperature: req.Temperature, TopP: req.TopP,
+		MaxTokens: req.MaxTokens, Stop: req.Stop, Reasoning: req.Reasoning,
+		ResponseFormat: req.ResponseFormat, Extra: req.Extra,
 	}
-	return b.String()
+	encoded, _ := json.Marshal(input)
+	return string(encoded)
+}
+
+// RequestKey is the exact isolation key paired with the semantic vector.
+func RequestKey(req *core.ChatRequest) string {
+	sum := sha256.Sum256([]byte(PromptText(req)))
+	return hex.EncodeToString(sum[:])
 }
 
 // HashEmbedder is a deterministic, dependency-free embedder. Identical prompts
