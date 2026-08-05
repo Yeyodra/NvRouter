@@ -875,7 +875,7 @@ func projectStreamFrame(raw, payload []byte, dialect core.Dialect, publicModel s
 	if err := json.Unmarshal(payload, &value); err != nil {
 		return nil, responseIntegrityError("provider stream contained malformed JSON")
 	}
-	projectModelFields(value, publicModel)
+	projectProtocolModel(value, dialect, publicModel)
 	projected, err := json.Marshal(value)
 	if err != nil {
 		return nil, responseIntegrityError("provider stream contained invalid JSON")
@@ -901,19 +901,31 @@ func projectStreamFrame(raw, payload []byte, dialect core.Dialect, publicModel s
 	return out.Bytes(), nil
 }
 
-func projectModelFields(value any, publicModel string) {
-	switch value := value.(type) {
-	case map[string]any:
-		for key, child := range value {
-			if key == "model" {
-				value[key] = publicModel
-				continue
-			}
-			projectModelFields(child, publicModel)
+func projectProtocolModel(value any, dialect core.Dialect, publicModel string) {
+	root, ok := value.(map[string]any)
+	if !ok {
+		return
+	}
+	switch dialect {
+	case core.DialectOpenAI, core.DialectOllama:
+		if _, exists := root["model"]; exists {
+			root["model"] = publicModel
 		}
-	case []any:
-		for _, child := range value {
-			projectModelFields(child, publicModel)
+	case core.DialectOpenAIResponses:
+		if response, ok := root["response"].(map[string]any); ok {
+			if _, exists := response["model"]; exists {
+				response["model"] = publicModel
+			}
+		}
+	case core.DialectAnthropic:
+		if message, ok := root["message"].(map[string]any); ok {
+			if _, exists := message["model"]; exists {
+				message["model"] = publicModel
+			}
+		}
+	case core.DialectGemini:
+		if _, exists := root["modelVersion"]; exists {
+			root["modelVersion"] = publicModel
 		}
 	}
 }

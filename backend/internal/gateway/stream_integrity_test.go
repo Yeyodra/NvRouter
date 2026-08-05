@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -177,6 +178,44 @@ func TestCopySanitizedResponsesRejectsContentAfterTerminal(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "late") {
 		t.Fatalf("post-terminal content was forwarded: %q", out.String())
+	}
+}
+
+func TestProjectStreamFrameOnlyRewritesProtocolModel(t *testing.T) {
+	tests := []struct {
+		name    string
+		dialect core.Dialect
+		payload string
+		path    []string
+	}{
+		{"openai", core.DialectOpenAI, `{"model":"internal","choices":[{"delta":{"tool_calls":[{"function":{"arguments":{"model":"customer-selected-value"}}}]}}]}`, []string{"model"}},
+		{"responses", core.DialectOpenAIResponses, `{"type":"response.created","response":{"model":"internal","output":[{"arguments":{"model":"customer-selected-value"}}]}}`, []string{"response", "model"}},
+		{"anthropic", core.DialectAnthropic, `{"type":"message_start","message":{"model":"internal","content":[{"input":{"model":"customer-selected-value"}}]}}`, []string{"message", "model"}},
+		{"gemini", core.DialectGemini, `{"modelVersion":"internal","candidates":[{"content":{"parts":[{"functionCall":{"args":{"model":"customer-selected-value"}}}]}}]}`, []string{"modelVersion"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := []byte("data: " + tt.payload + "\n\n")
+			out, err := projectStreamFrame(raw, []byte(tt.payload), tt.dialect, "public-safe-route")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var projected map[string]any
+			data := strings.TrimSpace(strings.TrimPrefix(string(out), "data:"))
+			if err := json.Unmarshal([]byte(data), &projected); err != nil {
+				t.Fatal(err)
+			}
+			value := any(projected)
+			for _, key := range tt.path {
+				value = value.(map[string]any)[key]
+			}
+			if value != "public-safe-route" {
+				t.Fatalf("protocol model = %v", value)
+			}
+			if !strings.Contains(string(out), `"model":"customer-selected-value"`) {
+				t.Fatalf("nested tool model was mutated: %s", out)
+			}
+		})
 	}
 }
 
