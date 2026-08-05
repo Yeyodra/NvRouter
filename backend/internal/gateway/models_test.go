@@ -5,140 +5,139 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/mydisha/keirouter/backend/internal/config"
-	"github.com/mydisha/keirouter/backend/internal/crypto"
 	"github.com/mydisha/keirouter/backend/internal/identity"
 	"github.com/mydisha/keirouter/backend/internal/store"
-	"github.com/mydisha/keirouter/backend/internal/vault"
 )
 
-func TestListModelsOnlyShowsConnectedProviders(t *testing.T) {
-	gw, apiKey := newModelDiscoveryTestGateway(t, []store.Account{
-		modelDiscoveryAccount("acc-openai", "openai", false, false),
-		modelDiscoveryAccount("acc-anthropic-disabled", "anthropic", true, false),
-		modelDiscoveryAccount("acc-gemini-reconnect", "gemini", false, true),
-	})
+func TestListModelsUsesEffectiveKeyVisibility(t *testing.T) {
+	gw, db, keys := newPublicModelsTestGateway(t, "first", "second")
+	createPublicRoutes(t, db)
+	require.NoError(t, db.APIKeys().SetAllowedModels(context.Background(), keys[0].Record.ID, []string{"fast"}))
+	require.NoError(t, db.APIKeys().SetAllowedModels(context.Background(), keys[1].Record.ID, []string{"safe"}))
 
-	body := getAuthedJSON(t, gw, apiKey, "/v1/models")
-	models := modelIDsFromResponse(t, body)
+	first := getAuthedJSON(t, gw, keys[0].Plaintext, "/v1/models")
+	second := getAuthedJSON(t, gw, keys[1].Plaintext, "/v1/models")
 
-	require.NotEmpty(t, models)
-	require.Contains(t, models, "openai/gpt-4o")
-	require.NotContains(t, models, "anthropic/claude-sonnet-4-20250514")
-	require.NotContains(t, models, "gemini/gemini-2.5-pro")
-	for _, id := range models {
-		if strings.Contains(id, "/") {
-			require.Truef(t, strings.HasPrefix(id, "openai/"), "unexpected unconnected provider model %q", id)
-		}
+	require.Equal(t, []string{"fast"}, modelIDsFromResponse(t, first))
+	require.Equal(t, []string{"safe"}, modelIDsFromResponse(t, second))
+	assertPublicModelEntries(t, first)
+	assertPublicModelEntries(t, second)
+}
+
+func TestListModelsRestrictedReturnsExactPublicIDsWithoutRegisteredRoutes(t *testing.T) {
+	gw, db, keys := newPublicModelsTestGateway(t, "restricted")
+	allowed := []string{"auto", "openai/gpt-5.6-sol", "claude-opus-4.8"}
+	require.NoError(t, db.APIKeys().SetAllowedModels(context.Background(), keys[0].Record.ID, allowed))
+
+	body := getAuthedJSON(t, gw, keys[0].Plaintext, "/v1/models")
+	require.ElementsMatch(t, allowed, modelIDsFromResponse(t, body))
+	assertPublicModelEntries(t, body)
+}
+
+func TestListModelsUnrestrictedShowsOnlyPublicRoutes(t *testing.T) {
+	gw, db, keys := newPublicModelsTestGateway(t, "unrestricted")
+	createPublicRoutes(t, db)
+
+	body := getAuthedJSON(t, gw, keys[0].Plaintext, "/v1/models")
+	require.ElementsMatch(t, []string{"fast", "safe", "resilient"}, modelIDsFromResponse(t, body))
+	assertPublicModelEntries(t, body)
+
+	encoded, err := json.Marshal(body)
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), "openai")
+	require.NotContains(t, string(encoded), "anthropic")
+	require.NotContains(t, string(encoded), "internal-")
+}
+
+func TestListModelsByKindCannotBypassVisibility(t *testing.T) {
+	gw, db, keys := newPublicModelsTestGateway(t, "restricted")
+	createPublicRoutes(t, db)
+	require.NoError(t, db.APIKeys().SetAllowedModels(context.Background(), keys[0].Record.ID, []string{"fast"}))
+
+	for _, path := range []string{"/v1/models/llm", "/v1/models/embedding", "/v1/models/chains"} {
+		t.Run(path, func(t *testing.T) {
+			body := getAuthedJSON(t, gw, keys[0].Plaintext, path)
+			require.Equal(t, []string{"fast"}, modelIDsFromResponse(t, body))
+			assertPublicModelEntries(t, body)
+		})
 	}
 }
 
-func TestListModelsByKindOnlyShowsConnectedProviders(t *testing.T) {
-	gw, apiKey := newModelDiscoveryTestGateway(t, []store.Account{
-		modelDiscoveryAccount("acc-openai", "openai", false, false),
-	})
-
-	body := getAuthedJSON(t, gw, apiKey, "/v1/models/embedding")
-	models := modelIDsFromResponse(t, body)
-
-	require.Contains(t, models, "openai/text-embedding-3-small")
-	for _, id := range models {
-		require.Truef(t, strings.HasPrefix(id, "openai/"), "unexpected unconnected provider model %q", id)
-	}
-}
-
-func TestModelInfoOnlyShowsConnectedProviders(t *testing.T) {
-	gw, apiKey := newModelDiscoveryTestGateway(t, []store.Account{
-		modelDiscoveryAccount("acc-openai", "openai", false, false),
-	})
-
-	body := getAuthedJSON(t, gw, apiKey, "/v1/models/info?id=openai/gpt-4o")
-	require.Equal(t, "openai", body["provider"])
-	require.Equal(t, "gpt-4o", body["model"])
-
+func TestModelInfoDoesNotExposeProviderMetadata(t *testing.T) {
+	gw, _, keys := newPublicModelsTestGateway(t, "public")
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/v1/models/info?id=anthropic/claude-sonnet-4-20250514", nil)
-	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req := httptest.NewRequest(http.MethodGet, "/v1/models/info?id=openai/gpt-4o", nil)
+	req.Header.Set("Authorization", "Bearer "+keys[0].Plaintext)
+
 	gw.Handler().ServeHTTP(rec, req)
+
 	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	require.NotContains(t, rec.Body.String(), "openai")
+	require.NotContains(t, rec.Body.String(), "gpt-4o")
 }
 
-func TestListModelsStillShowsChains(t *testing.T) {
-	gw, apiKey := newModelDiscoveryTestGateway(t, nil)
-	require.NoError(t, gw.chains.Create(context.Background(), store.Chain{
-		ID:       "chain-fast",
-		TenantID: store.DefaultTenantID,
-		Name:     "fast",
-		Strategy: "fallback",
-		Steps: []store.ChainStep{{
-			Position: 0,
-			Provider: "openai",
-			Model:    "gpt-4o",
-		}},
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
-	}))
-
-	body := getAuthedJSON(t, gw, apiKey, "/v1/models")
-	models := modelIDsFromResponse(t, body)
-
-	require.Equal(t, []string{"fast"}, models)
-}
-
-func newModelDiscoveryTestGateway(t *testing.T, accounts []store.Account) (*Server, string) {
+func newPublicModelsTestGateway(t *testing.T, names ...string) (*Server, *store.DB, []identity.Issued) {
 	t.Helper()
 	ctx := context.Background()
-
 	db, err := store.Open(ctx, config.DatabaseConfig{Driver: "sqlite", DSN: ":memory:"}, t.TempDir())
 	require.NoError(t, err)
 	require.NoError(t, db.Migrate(ctx))
 	require.NoError(t, db.Tenants().EnsureDefault(ctx))
 	t.Cleanup(func() { _ = db.Close() })
 
-	mk, err := crypto.GenerateMasterKey()
-	require.NoError(t, err)
-	sealer, err := crypto.NewSealer(mk)
-	require.NoError(t, err)
-	v := vault.New(sealer)
-
-	for _, acc := range accounts {
-		require.NoError(t, v.Seal(&acc, vault.NewSecret{APIKey: "sk-test"}))
-		require.NoError(t, db.Accounts().Create(ctx, acc))
+	idSvc := identity.New(db.APIKeys())
+	keys := make([]identity.Issued, 0, len(names))
+	for _, name := range names {
+		issued, err := idSvc.Create(ctx, store.DefaultTenantID, "", name)
+		require.NoError(t, err)
+		keys = append(keys, issued)
 	}
 
-	idSvc := identity.New(db.APIKeys())
-	issued, err := idSvc.Create(ctx, store.DefaultTenantID, "", "test-key")
-	require.NoError(t, err)
-
-	gw := New(Deps{
+	return New(Deps{
 		Config:   config.Default(),
+		DB:       db,
 		Identity: idSvc,
 		Chains:   db.Chains(),
-		Accounts: db.Accounts(),
-		Vault:    v,
-	})
-	return gw, issued.Plaintext
+		Aliases:  db.Aliases(),
+	}), db, keys
 }
 
-func modelDiscoveryAccount(id, provider string, disabled, needsReconnect bool) store.Account {
-	now := time.Now()
-	return store.Account{
-		ID:             id,
-		TenantID:       store.DefaultTenantID,
-		Provider:       provider,
-		Label:          id,
-		AuthKind:       store.AuthAPIKey,
-		Priority:       10,
-		Disabled:       disabled,
-		NeedsReconnect: needsReconnect,
-		CreatedAt:      now,
-		UpdatedAt:      now,
+func createPublicRoutes(t *testing.T, db *store.DB) {
+	t.Helper()
+	ctx := context.Background()
+	require.NoError(t, db.Aliases().Set(ctx, "fast", "openai/internal-fast"))
+	require.NoError(t, db.Aliases().Set(ctx, "safe", "anthropic/internal-safe"))
+	require.NoError(t, db.Chains().Create(ctx, store.Chain{
+		ID:       "chain-resilient",
+		TenantID: store.DefaultTenantID,
+		Name:     "resilient",
+		Strategy: "fallback",
+		Steps: []store.ChainStep{
+			{ID: "step-primary", Position: 0, Provider: "openai", Model: "internal-primary", CreatedAt: time.Now()},
+			{ID: "step-fallback", Position: 1, Provider: "anthropic", Model: "internal-fallback", CreatedAt: time.Now()},
+		},
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}))
+}
+
+func assertPublicModelEntries(t *testing.T, body map[string]any) {
+	t.Helper()
+	items, ok := body["data"].([]any)
+	require.True(t, ok)
+	for _, item := range items {
+		entry, ok := item.(map[string]any)
+		require.True(t, ok)
+		require.Len(t, entry, 3)
+		require.Equal(t, "model", entry["object"])
+		require.Equal(t, "nvrouter", entry["owned_by"])
+		require.NotContains(t, entry, "provider")
 	}
 }
 
@@ -161,9 +160,9 @@ func modelIDsFromResponse(t *testing.T, body map[string]any) []string {
 	require.True(t, ok)
 	out := make([]string, 0, len(items))
 	for _, item := range items {
-		m, ok := item.(map[string]any)
+		entry, ok := item.(map[string]any)
 		require.True(t, ok)
-		id, ok := m["id"].(string)
+		id, ok := entry["id"].(string)
 		require.True(t, ok)
 		out = append(out, id)
 	}

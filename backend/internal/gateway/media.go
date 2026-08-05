@@ -22,20 +22,13 @@ import (
 // the model string to fallback targets and attaches tenant/scope metadata.
 func (s *Server) mediaOptions(r *http.Request, model string) (pipeline.MediaOptions, error) {
 	key, _ := authedKey(r.Context())
+	if err := s.authorizeRequestedModel(r.Context(), key.ID, model); err != nil {
+		return pipeline.MediaOptions{}, err
+	}
 	tenantID := tenantOf(key)
 	resolved, err := resolveTargets(r.Context(), s.chains, s.aliases, s.latencyReader(), tenantID, model)
 	if err != nil {
 		return pipeline.MediaOptions{}, err
-	}
-	if len(resolved.Targets) > 0 {
-		filtered, ferr := s.filterAllowedTargets(r.Context(), key.ID, resolved.Targets)
-		if ferr != nil {
-			return pipeline.MediaOptions{}, ferr
-		}
-		if len(filtered) == 0 {
-			return pipeline.MediaOptions{}, accessDeniedError{model: model}
-		}
-		resolved.Targets = filtered
 	}
 	effectiveLimits, err := s.effectiveLimits(r.Context(), key)
 	if err != nil {

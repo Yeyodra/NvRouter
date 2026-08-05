@@ -67,6 +67,15 @@ func (s *Server) handleGeminiGenerate(w http.ResponseWriter, r *http.Request) {
 		RequestID:     chimiddleware.GetReqID(r.Context()),
 	}
 
+	if err := s.authorizeRequestedModel(r.Context(), key.ID, req.Model); err != nil {
+		if _, denied := err.(accessDeniedError); denied {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "model access check failed")
+		return
+	}
+
 	resolved, err := resolveTargets(r.Context(), s.chains, s.aliases, s.latencyReader(), tenantID, req.Model)
 	if err != nil {
 		var bad badModelError

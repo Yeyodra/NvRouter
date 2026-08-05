@@ -19,7 +19,7 @@ import (
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/mydisha/keirouter/backend/internal/budget"
 	"github.com/mydisha/keirouter/backend/internal/core"
-	"github.com/mydisha/keirouter/backend/internal/dispatch"
+
 	"github.com/mydisha/keirouter/backend/internal/limits"
 	"github.com/mydisha/keirouter/backend/internal/pipeline"
 	"github.com/mydisha/keirouter/backend/internal/store"
@@ -170,6 +170,19 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request, dialect core
 		fmt.Sprintf("Model:    %s\nMessages: %d\nStream:   %v\nTenant:   %s\nKey:      %s (%s)",
 			req.Model, len(req.Messages), req.Stream, tenantID, key.Name, key.ID))
 
+	if err := s.authorizeRequestedModel(r.Context(), key.ID, req.Model); err != nil {
+		if _, denied := err.(accessDeniedError); denied {
+			s.consoleLog.Log("WARN",
+				fmt.Sprintf("Access denied · key %q may not use %q", key.Name, req.Model),
+				fmt.Sprintf("Key:   %s (%s)\nModel: %s", key.Name, key.ID, req.Model))
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+		s.consoleLog.Log("ERROR", "Model access check failed", err.Error())
+		writeError(w, http.StatusInternalServerError, "model access check failed")
+		return
+	}
+
 	resolved, err := resolveTargets(r.Context(), s.chains, s.aliases, s.latencyReader(), tenantID, req.Model)
 	if err != nil {
 		var bad badModelError
@@ -191,25 +204,6 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request, dialect core
 		req.Metadata.Provider = resolved.Targets[0].Provider
 	}
 	req.Metadata.ChainID = resolved.PlanOpts.ChainID
-
-	// Enforce per-key model access restrictions. Filter resolved targets to
-	// only include models the key is allowed to access.
-	if len(resolved.Targets) > 0 {
-		filtered, ferr := s.filterAllowedTargets(r.Context(), key.ID, resolved.Targets)
-		if ferr != nil {
-			s.consoleLog.Log("ERROR", "Model access check failed", ferr.Error())
-			writeError(w, http.StatusInternalServerError, "model access check failed")
-			return
-		}
-		if len(filtered) == 0 {
-			s.consoleLog.Log("WARN",
-				fmt.Sprintf("Access denied · key %q may not use %q", key.Name, req.Model),
-				fmt.Sprintf("Key:   %s (%s)\nModel: %s", key.Name, key.ID, req.Model))
-			writeError(w, http.StatusForbidden, "access denied: this API key is not permitted to use model "+req.Model)
-			return
-		}
-		resolved.Targets = filtered
-	}
 
 	if len(resolved.Targets) > 0 {
 		primary := resolved.Targets[0]
@@ -1070,29 +1064,15 @@ func isClientDisconnect(err error) bool {
 		strings.Contains(s, "http2: stream closed")
 }
 
-// filterAllowedTargets filters resolved routing targets to only include models
-// the given API key is allowed to access. Returns empty slice if no target
-// matches the key's model access policy.
-func (s *Server) filterAllowedTargets(ctx context.Context, keyID string, targets []dispatch.Target) ([]dispatch.Target, error) {
-	keys := s.identity.Keys()
-	allowed, err := keys.GetAllowedModels(ctx, keyID)
+func (s *Server) authorizeRequestedModel(ctx context.Context, keyID, model string) error {
+	allowed, err := s.identity.Keys().GetAllowedModels(ctx, keyID)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if len(allowed) == 0 {
-		return targets, nil // no restriction
+	if len(allowed) > 0 && !modelMatchesAny(model, allowed) {
+		return accessDeniedError{model: model}
 	}
-
-	// Match all targets in-memory against the already-fetched allowed list.
-	// This avoids N additional DB round-trips (one per target) that the
-	// previous IsModelAllowed-per-target pattern caused.
-	var filtered []dispatch.Target
-	for _, t := range targets {
-		if modelMatchesAny(t.Model, allowed) {
-			filtered = append(filtered, t)
-		}
-	}
-	return filtered, nil
+	return nil
 }
 
 // modelMatchesAny reports whether model matches any pattern in allowed.
