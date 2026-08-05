@@ -245,9 +245,9 @@ function HeadroomAdvisory() {
 }
 
 // HeadroomInstallHelp explains how to install and run a local Headroom proxy.
-// Headroom is the open-source headroom-ai proxy; KeiRouter calls its
+// Headroom is the open-source headroom-ai proxy; NvRouter calls its
 // /v1/compress endpoint. Shown inside the Headroom card so operators can get a
-// proxy running before pointing KeiRouter at it.
+// proxy running before pointing NvRouter at it.
 function HeadroomInstallHelp() {
   return (
     <div className="border-t border-[var(--border)] px-6 py-4">
@@ -401,7 +401,7 @@ function SavingTab({
       <Card>
         <SectionHeader
           title="Terse mode (alternative)"
-          description="KeiRouter's own concise-output directive. An alternative to caveman; both inject a system instruction, so pick one."
+          description="NvRouter's own concise-output directive. An alternative to caveman; both inject a system instruction, so pick one."
           icon={Layers}
           iconTone="neutral"
         />
@@ -1046,7 +1046,7 @@ function BrandingTab() {
 
   if (branding.isLoading || !local) return <Spinner />;
 
-  const previewLogo = local.logo_url || "/keirouter-logo.png";
+  const previewLogo = local.logo_url || "/nvrouter-logo.svg";
 
   return (
     <Card>
@@ -1063,7 +1063,7 @@ function BrandingTab() {
               <Input
                 value={local.name}
                 onChange={(e) => update({ name: e.target.value })}
-                placeholder="KeiRouter"
+                placeholder="NvRouter"
               />
               <p className="mt-1 text-xs text-[var(--text-muted)]">
                 Shown in sidebar, tab title, login screen, and Usage Dashboard.
@@ -1121,7 +1121,7 @@ function BrandingTab() {
           <div className="flex items-center gap-4 rounded-xl border border-[var(--border)] bg-[var(--bg-subtle)] p-4">
             <img src={previewLogo} alt={local.name || "Logo"} className="h-10 w-10 object-contain" />
             <div>
-              <p className="text-sm font-semibold text-[var(--text)]">{local.name || "KeiRouter"}</p>
+              <p className="text-sm font-semibold text-[var(--text)]">{local.name || "NvRouter"}</p>
               {local.tagline && <p className="text-xs text-[var(--text-muted)]">{local.tagline}</p>}
             </div>
           </div>
@@ -1534,7 +1534,7 @@ function DatabaseSettings() {
       const result = await api.restoreSQLite(pendingSQLiteFile);
       toast.success(
         "SQLite restore staged",
-        `Safety backup created at ${result.safety_backup}. Restart KeiRouter to load restored database.`,
+        `Safety backup created at ${result.safety_backup}. Restart NvRouter to load restored database.`,
       );
       resetSQLiteRestore();
     } catch (e) {
@@ -1580,7 +1580,7 @@ function DatabaseSettings() {
       <Card>
         <SectionHeader
           title="Configuration backup"
-          description="Export or import KeiRouter configuration as JSON. Portable mode re-keys credentials with a passphrase."
+          description="Export or import NvRouter configuration as JSON. Portable mode re-keys credentials with a passphrase."
           icon={Database}
         />
         <div className="flex flex-wrap items-center gap-3 border-t border-[var(--border)] px-6 py-4">
@@ -1835,7 +1835,7 @@ function DatabaseSettings() {
               {pendingSQLiteFile?.name ?? "No file selected"}
             </p>
             <p className="mt-1 text-xs leading-relaxed text-[var(--text-muted)]">
-              KeiRouter creates a safety backup before replacing the database. Restart required after restore because current DB connections still point at the old file.
+              NvRouter creates a safety backup before replacing the database. Restart required after restore because current DB connections still point at the old file.
             </p>
           </div>
 
@@ -1843,7 +1843,7 @@ function DatabaseSettings() {
 
           <div className="flex items-start gap-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-900/20 dark:text-amber-200">
             <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            <span>Use only trusted KeiRouter SQLite backups. Restoring wrong data may break providers, keys, usage records, and settings.</span>
+            <span>Use only trusted NvRouter SQLite backups. Restoring wrong data may break providers, keys, usage records, and settings.</span>
           </div>
         </div>
 
@@ -1898,7 +1898,7 @@ function UpdatesSettings() {
     <Card>
       <SectionHeader
         title="Updates"
-        description="Check for new KeiRouter releases and read the latest changelog."
+        description="Check for new NvRouter releases and read the latest changelog."
         icon={ArrowUpCircle}
         action={
           <Button variant="ghost" className="h-8 px-3 text-xs" onClick={checkNow} disabled={checking}>

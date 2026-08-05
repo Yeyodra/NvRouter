@@ -77,7 +77,7 @@ export function KeyPortalPage() {
         <div className="w-full max-w-md animate-[page-in_0.3s_ease-out]">
           <Card className="p-8 md:p-10 text-center shadow-float border-0 ring-1 ring-[var(--border)]">
             <div className="mx-auto mb-6 flex h-16 w-16 items-center justify-center rounded-2xl bg-[var(--bg-subtle)] ring-1 ring-inset ring-[var(--border)]">
-              <img src={logoSrc} alt={branding.name || "KeiRouter"} className="h-8 object-contain" />
+              <img src={logoSrc} alt={branding.name || "NvRouter"} className="h-8 object-contain" />
             </div>
             <h1 className="mb-2 text-2xl font-display tracking-tight text-[var(--text)]">Portal Access</h1>
             <p className="mb-8 text-sm text-[var(--text-muted)]">
@@ -150,7 +150,7 @@ export function KeyPortalPage() {
         <header className="flex flex-col gap-6 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-5">
             <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl bg-[var(--bg-elevated)] border border-[var(--border)] shadow-sm">
-              <img src={logoSrc} alt={branding.name || "KeiRouter"} className="h-8 object-contain" />
+              <img src={logoSrc} alt={branding.name || "NvRouter"} className="h-8 object-contain" />
             </div>
             <div>
               <h1 className="text-2xl md:text-3xl font-display font-semibold text-[var(--text)] tracking-tight">Usage Dashboard</h1>

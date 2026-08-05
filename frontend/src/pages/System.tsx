@@ -155,7 +155,7 @@ export function SystemPage() {
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 mb-6">
         <MetricChart
           title="Process CPU"
-          description="keirouter's own CPU usage over time"
+          description="NvRouter's own CPU usage over time"
           icon={Cpu}
           data={chartData}
           dataKey="procCpu"
@@ -165,7 +165,7 @@ export function SystemPage() {
         />
         <MetricChart
           title="Process RSS"
-          description="keirouter's resident memory over time"
+          description="NvRouter's resident memory over time"
           icon={MemoryStick}
           data={chartData}
           dataKey="procRss"

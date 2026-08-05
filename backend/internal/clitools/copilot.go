@@ -31,7 +31,7 @@ func (t *CopilotTool) DetectStatus(homeDir string) (bool, bool, string, error) {
 		return true, false, path, nil
 	}
 	for _, e := range entries {
-		if name, _ := e["name"].(string); name == "KeiRouter" {
+		if name, _ := e["name"].(string); name == "NvRouter" || name == "KeiRouter" {
 			return true, true, path, nil
 		}
 	}
@@ -47,10 +47,10 @@ func (t *CopilotTool) Configure(homeDir, baseURL, apiKey string, models []string
 		entries = []map[string]any{}
 	}
 
-	// Remove existing KeiRouter entry.
+	// Remove existing NvRouter or legacy KeiRouter entry.
 	filtered := make([]map[string]any, 0, len(entries))
 	for _, e := range entries {
-		if name, _ := e["name"].(string); name != "KeiRouter" {
+		if name, _ := e["name"].(string); name != "NvRouter" && name != "KeiRouter" {
 			filtered = append(filtered, e)
 		}
 	}
@@ -79,7 +79,7 @@ func (t *CopilotTool) Configure(homeDir, baseURL, apiKey string, models []string
 	}
 
 	entry := map[string]any{
-		"name":   "KeiRouter",
+		"name":   "NvRouter",
 		"vendor": "azure",
 		"apiKey": apiKey,
 		"models": modelEntries,
@@ -100,7 +100,7 @@ func (t *CopilotTool) Remove(homeDir string) error {
 	}
 	filtered := make([]map[string]any, 0, len(entries))
 	for _, e := range entries {
-		if name, _ := e["name"].(string); name != "KeiRouter" {
+		if name, _ := e["name"].(string); name != "NvRouter" && name != "KeiRouter" {
 			filtered = append(filtered, e)
 		}
 	}
@@ -125,7 +125,7 @@ func vscodeConfigDir(homeDir string) string {
 	}
 }
 
-// containsKeiRouter reports whether a JSON string contains a KeiRouter marker.
+// containsKeiRouter reports whether a JSON string contains a current or legacy marker.
 func containsKeiRouter(s string) bool {
-	return strings.Contains(s, "KeiRouter") || strings.Contains(s, "keirouter")
+	return strings.Contains(s, "NvRouter") || strings.Contains(s, "KeiRouter") || strings.Contains(s, "keirouter")
 }

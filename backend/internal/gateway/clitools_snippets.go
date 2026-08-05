@@ -74,7 +74,7 @@ model = "%s"
 model_provider = "keirouter"
 
 [model_providers.keirouter]
-name = "KeiRouter"
+name = "NvRouter"
 base_url = "%s"
 wire_api = "chat"
 
@@ -122,7 +122,7 @@ func snippetCopilot(baseURL, apiKey, model string) cliToolSnippet {
 # (or ~/.config/Code/User/chatLanguageModels.json on Linux)
 [
   {
-    "name": "KeiRouter",
+    "name": "NvRouter",
     "vendor": "azure",
     "apiKey": "%s",
     "models": [
@@ -157,7 +157,7 @@ func snippetDroid(baseURL, apiKey, model string) cliToolSnippet {
       "index": 0,
       "baseUrl": "%s",
       "apiKey": "%s",
-      "displayName": "KeiRouter",
+      "displayName": "NvRouter",
       "maxOutputTokens": 131072,
       "noImageSupport": false,
       "provider": "openai"
@@ -209,7 +209,7 @@ func snippetOpenCode(baseURL, apiKey, model string) cliToolSnippet {
   "provider": {
     "keirouter": {
       "npm": "@opencode-ai/provider-openai-compatible",
-      "name": "KeiRouter",
+      "name": "NvRouter",
       "options": {
         "baseURL": "%s",
         "apiKey": "%s"

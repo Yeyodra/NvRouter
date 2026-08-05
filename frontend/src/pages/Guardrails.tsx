@@ -150,7 +150,7 @@ function TenantFlagsCard() {
               When off, every policy is forced back to its native engine — OpenAI Moderation,
               Microsoft Presidio, and embedding-based topic matching are disabled tenant-wide.
               Use this for GDPR / data-residency setups where prompt content must never leave
-              the KeiRouter process.
+              the NvRouter process.
               {!allow && (
                 <span className="block mt-1 text-rose-600 dark:text-rose-300 font-medium">
                   External engines disabled — all detector traffic stays inside this container.

@@ -1018,7 +1018,7 @@ function StepSuccess({
   const portalUrl = `${window.location.origin}/portal?id=${created.id}`;
 
   const shareText = [
-    "Keirouter",
+    "NvRouter",
     `Endpoint : ${endpointUrl}`,
     `API Key : ${created.key}`,
     `Portal Monitoring : ${portalUrl}`,

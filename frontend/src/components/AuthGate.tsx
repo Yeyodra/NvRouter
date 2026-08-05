@@ -56,8 +56,8 @@ function AuthGateLogo({ className }: { className?: string }) {
     staleTime: 5 * 60_000,
     retry: false,
   });
-  const src = data?.logo_url || "/keirouter-logo.png";
-  return <img src={src} alt={data?.name || "KeiRouter"} className={className} />;
+  const src = data?.logo_url || "/nvrouter-logo.svg";
+  return <img src={src} alt={data?.name || "NvRouter"} className={className} />;
 }
 
 function AuthGateName() {
@@ -67,7 +67,7 @@ function AuthGateName() {
     staleTime: 5 * 60_000,
     retry: false,
   });
-  return <>{data?.name || "KeiRouter"}</>;
+  return <>{data?.name || "NvRouter"}</>;
 }
 
 function LoginScreen() {

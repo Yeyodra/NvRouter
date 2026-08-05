@@ -5,7 +5,7 @@ import { getPaletteScales } from "../lib/palettes";
 import { applyShadeScale } from "../lib/color-utils";
 
 const DEFAULT_BRANDING: BrandingSettings = {
-  name: "KeiRouter",
+  name: "NvRouter",
   logo_url: "",
   favicon_url: "",
   tagline: "",
@@ -21,8 +21,8 @@ interface BrandingContextValue {
 
 const BrandingContext = createContext<BrandingContextValue>({
   branding: DEFAULT_BRANDING,
-  logoSrc: "/keirouter-logo.png",
-  faviconSrc: "/keirouter-favicon.png",
+  logoSrc: "/nvrouter-logo.svg",
+  faviconSrc: "/nvrouter-favicon.svg",
   isLoading: false,
 });
 
@@ -38,8 +38,8 @@ export function AdminBrandingProvider({ children }: { children: ReactNode }) {
   });
 
   const branding = data ?? DEFAULT_BRANDING;
-  const logoSrc = branding.logo_url || "/keirouter-logo.png";
-  const faviconSrc = branding.favicon_url || "/keirouter-favicon.png";
+  const logoSrc = branding.logo_url || "/nvrouter-logo.svg";
+  const faviconSrc = branding.favicon_url || "/nvrouter-favicon.svg";
 
   // Update document title, favicon, and color palette dynamically
   useEffect(() => {
@@ -82,11 +82,11 @@ export function PortalBrandingProvider({ children }: { children: ReactNode }) {
   });
 
   const branding = data ?? DEFAULT_BRANDING;
-  const logoSrc = branding.logo_url || "/keirouter-logo.png";
-  const faviconSrc = branding.favicon_url || "/keirouter-favicon.png";
+  const logoSrc = branding.logo_url || "/nvrouter-logo.svg";
+  const faviconSrc = branding.favicon_url || "/nvrouter-favicon.svg";
 
   useEffect(() => {
-    const title = branding.name || "KeiRouter";
+    const title = branding.name || "NvRouter";
     document.title = `${title} — Usage Dashboard`;
     if (branding.favicon_url) {
       let link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');

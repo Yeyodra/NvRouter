@@ -166,7 +166,7 @@ export function Layout() {
   // Set browser tab title from current route.
   useEffect(() => {
     const label = titleForPath(location.pathname);
-    const appName = branding.name || "KeiRouter";
+    const appName = branding.name || "NvRouter";
     document.title = label ? `${appName} - ${label}` : appName;
   }, [location.pathname, branding.name]);
 
@@ -264,7 +264,7 @@ function SidebarContent({ onNavigate }: { onNavigate: () => void }) {
   return (
     <aside className="flex h-full w-60 shrink-0 flex-col border-r border-[var(--border)] bg-[var(--bg-elevated)]">
       <div className="flex items-center justify-between px-5 py-5">
-        <img src={logoSrc} alt={branding.name || "KeiRouter"} className="h-14 w-full object-contain object-left" />
+        <img src={logoSrc} alt={branding.name || "NvRouter"} className="h-14 w-full object-contain object-left" />
         {/* Close button — only visible on mobile when rendered inside the drawer. */}
         <button
           onClick={onNavigate}
@@ -355,7 +355,7 @@ function TopBar({ onMenuToggle, onSearchOpen }: { onMenuToggle: () => void; onSe
         <div className="hidden sm:block">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-muted)]" />
           <span className="block w-full rounded-xl border border-[var(--border)] bg-[var(--bg)] py-2 pl-9 pr-12 text-sm text-[var(--text-muted)]">
-            Search {branding.name || "KeiRouter"}…
+            Search {branding.name || "NvRouter"}…
           </span>
           <kbd className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 rounded border border-[var(--border)] bg-[var(--bg-elevated)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--text-muted)]">
             ⌘K

@@ -26,7 +26,7 @@ export const PALETTES: PaletteDefinition[] = [
   {
     id: "sage-terra",
     name: "Sage & Terra",
-    description: "Warm, earthy, grounded — the default KeiRouter identity.",
+    description: "Warm, earthy, grounded — the default NvRouter identity.",
     accent: "#6a7450",
     secondary: "#c3603a",
   },

@@ -1,4 +1,4 @@
-// Typed client for the KeiRouter admin API. All calls go through the dev-server
+// Typed client for the NvRouter admin API. All calls go through the dev-server
 // proxy (or the embedded static server in production) to /api.
 
 export interface RegionOption {
@@ -1196,7 +1196,7 @@ export interface PortalRecentRequest {
 export async function fetchPortalBranding(): Promise<BrandingSettings> {
   const resp = await fetch("/v1/portal/branding");
   if (!resp.ok) {
-    return { name: "KeiRouter", logo_url: "", favicon_url: "", tagline: "", color_palette: "sage-terra" };
+    return { name: "NvRouter", logo_url: "", favicon_url: "", tagline: "", color_palette: "sage-terra" };
   }
   return resp.json();
 }
@@ -1455,7 +1455,7 @@ export const api = {
     request<{ imported: number }>("POST", "/settings/database", passphrase ? { ...payload, passphrase } : payload),
 
   // Foreign config import: convert a 9router or OmniRoute backup JSON into
-  // KeiRouter records (accounts re-sealed, api keys re-hashed, combos → chains).
+  // NvRouter records (accounts re-sealed, api keys re-hashed, combos → chains).
   importForeignConfig: (source: "9router" | "omniroute", config: Record<string, unknown>) =>
     request<ForeignImportResult>("POST", "/settings/database/import-foreign", { source, config }, 600_000),
 

@@ -187,7 +187,7 @@ function KimchiIdle({ onStart }: { onStart: () => void }) {
         </h3>
         <ol className="space-y-2.5">
           <Step num={1} text="Click below to open the Kimchi sign-in page" />
-          <Step num={2} text="Authorize keirouter in the browser" />
+          <Step num={2} text="Authorize NvRouter in the browser" />
           <Step num={3} text="Kimchi redirects back with your token" />
           <Step num={4} text="Token is encrypted and stored locally" />
         </ol>

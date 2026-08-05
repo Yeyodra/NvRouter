@@ -117,7 +117,7 @@ function Overview() {
     <div>
       <PageHeader
         title="Provider Health"
-        description="Monitor the health of every AI provider connected to KeiRouter. See which are failing or slow, why, which routing chains are affected, and what to do next."
+        description="Monitor the health of every AI provider connected to NvRouter. See which are failing or slow, why, which routing chains are affected, and what to do next."
         action={
           <div className="flex flex-wrap items-center gap-2">
             <SegmentedControl value={range} onChange={setRange} options={RANGES} />

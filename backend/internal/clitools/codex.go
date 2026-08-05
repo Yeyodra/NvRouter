@@ -57,7 +57,7 @@ func (t *CodexTool) Configure(homeDir, baseURL, apiKey string, models []string) 
 		providers = make(map[string]any)
 	}
 	providers["keirouter"] = map[string]any{
-		"name":     "KeiRouter",
+		"name":     "NvRouter",
 		"base_url": ensureSuffix(baseURL, "/v1"),
 		"wire_api": "responses",
 	}

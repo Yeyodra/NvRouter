@@ -72,7 +72,7 @@ export function CLIToolDetailPage() {
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["cli-tools"] });
-      toast.success("Tool configured", `${tool?.name} is now routing through KeiRouter. All requests will use the proxy endpoint.`);
+      toast.success("Tool configured", `${tool?.name} is now routing through NvRouter. All requests will use the proxy endpoint.`);
     },
     onError: (e: Error) => toast.error("Tool configuration failed", e.message),
   });
@@ -81,7 +81,7 @@ export function CLIToolDetailPage() {
     mutationFn: () => api.cliToolRemove(toolId!),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["cli-tools"] });
-      toast.success("Config removed", `${tool?.name} has been disconnected from KeiRouter and will use its default endpoint.`);
+      toast.success("Config removed", `${tool?.name} has been disconnected from NvRouter and will use its default endpoint.`);
     },
     onError: (e: Error) => toast.error("Config removal failed", e.message),
   });

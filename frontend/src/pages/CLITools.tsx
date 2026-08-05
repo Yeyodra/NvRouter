@@ -36,7 +36,7 @@ export function CLIToolsPage() {
       <PageHeader
         title="CLI Tools"
         icon={TerminalSquare}
-        description="One-click configuration for coding tools, wired to this KeiRouter instance."
+        description="One-click configuration for coding tools, wired to this NvRouter instance."
       />
 
       {tools.isLoading ? (

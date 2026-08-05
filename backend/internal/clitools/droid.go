@@ -53,7 +53,7 @@ func (t *DroidTool) Configure(homeDir, baseURL, apiKey string, models []string) 
 			"id":              "custom:KeiRouter-0",
 			"baseUrl":         ensureSuffix(baseURL, "/v1"),
 			"apiKey":          apiKey,
-			"displayName":     "gpt-4o (KeiRouter)",
+			"displayName":     "gpt-4o (NvRouter)",
 			"maxOutputTokens": 131072,
 			"provider":        "openai",
 		}}

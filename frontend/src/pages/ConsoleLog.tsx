@@ -472,7 +472,7 @@ export function ConsoleLogPage() {
         ) : filtered.length === 0 && entries.length === 0 ? (
           <EmptyState
             title="No console logs yet"
-            hint="Requests will appear here once traffic flows through KeiRouter."
+            hint="Requests will appear here once traffic flows through NvRouter."
           />
         ) : filtered.length === 0 ? (
           <EmptyState

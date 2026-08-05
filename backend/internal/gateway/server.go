@@ -287,7 +287,7 @@ func (s *Server) routes() chi.Router {
 	// dashboard without giving unauthenticated scanners a deployment fingerprint.
 	r.Get("/v1", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{
-			"name":   "KeiRouter",
+			"name":   "NvRouter",
 			"status": "ok",
 		})
 	})

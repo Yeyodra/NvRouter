@@ -101,7 +101,7 @@ function ConnectionCard() {
     <Card>
       <CardHeader
         title="Connect an application"
-        description="Copy an endpoint, then authenticate requests with a key from KeiRouter."
+        description="Copy an endpoint, then authenticate requests with a key from NvRouter."
       />
       <div className="divide-y divide-[var(--border)]">
         <EndpointRow
@@ -115,7 +115,7 @@ function ConnectionCard() {
             label="Public endpoint · Cloudflare Tunnel"
             url={tunnelUrl}
             icon={<CloudflareLogo className="h-3.5 w-3.5 text-[#F6821F]" />}
-            hint="Publicly reachable URL from your Cloudflare tunnel. Use it to reach KeiRouter from anywhere."
+            hint="Publicly reachable URL from your Cloudflare tunnel. Use it to reach NvRouter from anywhere."
           />
         )}
       </div>

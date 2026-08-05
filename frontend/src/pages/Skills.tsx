@@ -10,7 +10,7 @@ import { Card, SectionHeader, CardHeader, Button, Input, Field, Spinner, EmptySt
 // call KeiRouter endpoints. These are static docs with copyable URLs, not
 // runtime request modifiers.
 const REFERENCE_SKILLS = [
-  { id: "keirouter", name: "KeiRouter (Entry)", endpoint: null as string | null, description: "Setup guide and index of all capabilities." },
+  { id: "keirouter", name: "NvRouter (Entry)", endpoint: null as string | null, description: "Setup guide and index of all capabilities." },
   { id: "keirouter-chat", name: "Chat", endpoint: "/v1/chat/completions", description: "Chat and code generation via OpenAI or Anthropic format with streaming." },
   { id: "keirouter-image", name: "Image Generation", endpoint: "/v1/images/generations", description: "Text-to-image via DALL-E, Imagen, FLUX, and more." },
   { id: "keirouter-tts", name: "Text-to-Speech", endpoint: "/v1/audio/speech", description: "OpenAI, ElevenLabs, Edge, Google, Deepgram voices." },
@@ -74,7 +74,7 @@ export function SkillsPage() {
         <Card>
           <SectionHeader
             title="Reference skills"
-            description="Copy a skill URL and paste it to your AI agent to teach it how to use KeiRouter endpoints."
+            description="Copy a skill URL and paste it to your AI agent to teach it how to use NvRouter endpoints."
             icon={BookOpen}
           />
           <div className="divide-y divide-[var(--border)]">

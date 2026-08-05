@@ -150,8 +150,8 @@ function SavingsCardContent({ data }: { data: SavingsCardData }) {
         >
           <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
             <img
-              src="/keirouter-logo.png"
-              alt="KeiRouter"
+              src="/nvrouter-logo.svg"
+              alt="NvRouter"
               style={{ width: 34, height: 34, objectFit: "contain" }}
               crossOrigin="anonymous"
             />
@@ -163,7 +163,7 @@ function SavingsCardContent({ data }: { data: SavingsCardData }) {
                 letterSpacing: "-0.01em",
               }}
             >
-              KeiRouter
+              NvRouter
             </span>
             <div style={{ width: 1, height: 16, background: C.border, margin: "0 8px" }} />
             <span
@@ -286,7 +286,7 @@ function SavingsCardContent({ data }: { data: SavingsCardData }) {
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}>
               <DataCard label="Tokens Saved" value={fmtNum(tokensSaved)} accent={cardAccents[0]} />
               <DataCard label="Total Requests" value={fmtNum(totalRequests)} accent={cardAccents[2]} />
-              <DataCard label="KeiRouter Cost" value={`$${formatCost(actualCost)}`} accent={cardAccents[1]} />
+              <DataCard label="NvRouter Cost" value={`$${formatCost(actualCost)}`} accent={cardAccents[1]} />
               {costSaved > 0 ? (
                 <DataCard label="Original Cost (Est)" value={`$${formatCost(actualCost + costSaved)}`} accent={cardAccents[3]} muted />
               ) : (
@@ -353,7 +353,7 @@ function SavingsCardContent({ data }: { data: SavingsCardData }) {
           }}
         >
           <span style={{ fontSize: 14, fontWeight: 600, color: C.textSecondary }}>
-            keirouter.dev
+            novela.biz.id
           </span>
           <span style={{ fontSize: 14, fontWeight: 500, color: C.textMuted }}>
             AI Routing, Optimized.
@@ -460,7 +460,7 @@ export function SavingsCardShareButton({
       });
 
       const link = document.createElement("a");
-      link.download = `keirouter-savings-${period}.png`;
+      link.download = `nvrouter-savings-${period}.png`;
       link.href = dataUrl;
       link.click();
       setDone(true);
@@ -511,7 +511,7 @@ export function SavingsCardShareButton({
         ) : (
           <>
             <img
-              src="/keirouter-logo.png"
+              src="/nvrouter-logo.svg"
               alt=""
               className="h-3.5 w-3.5 object-contain"
             />

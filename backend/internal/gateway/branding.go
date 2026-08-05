@@ -10,9 +10,9 @@ import (
 const brandingSettingsKey = "branding_settings"
 
 // BrandingSettings holds configurable branding for the dashboard and portal.
-// When empty, defaults to KeiRouter branding.
+// When empty, defaults to NvRouter branding.
 type BrandingSettings struct {
-	Name         string `json:"name"`          // Display name (e.g. "KeiRouter", "Acme AI Gateway")
+	Name         string `json:"name"`          // Display name (e.g. "NvRouter", "Acme AI Gateway")
 	LogoURL      string `json:"logo_url"`      // URL to logo image (SVG/PNG). Empty = default logo.
 	FaviconURL   string `json:"favicon_url"`   // URL to favicon (PNG/ICO). Empty = default favicon.
 	Tagline      string `json:"tagline"`       // Optional short tagline shown on portal login.
@@ -21,7 +21,7 @@ type BrandingSettings struct {
 
 func defaultBrandingSettings() BrandingSettings {
 	return BrandingSettings{
-		Name:         "KeiRouter",
+		Name:         "NvRouter",
 		LogoURL:      "",
 		FaviconURL:   "",
 		Tagline:      "",
