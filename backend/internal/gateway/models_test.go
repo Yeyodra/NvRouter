@@ -13,6 +13,7 @@ import (
 	"github.com/mydisha/keirouter/backend/internal/config"
 	"github.com/mydisha/keirouter/backend/internal/identity"
 	"github.com/mydisha/keirouter/backend/internal/store"
+	"github.com/mydisha/keirouter/backend/internal/transform"
 )
 
 func TestListModelsUsesEffectiveKeyVisibility(t *testing.T) {
@@ -105,6 +106,7 @@ func newPublicModelsTestGateway(t *testing.T, names ...string) (*Server, *store.
 		Identity: idSvc,
 		Chains:   db.Chains(),
 		Aliases:  db.Aliases(),
+		Codecs:   transform.DefaultRegistry(),
 	}), db, keys
 }
 

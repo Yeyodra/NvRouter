@@ -41,16 +41,33 @@ func TestMediaOptionsPreservesPublicRouteWildcard(t *testing.T) {
 	require.Len(t, opts.Targets, 2)
 }
 
-func TestForbiddenRequestedRouteReturns403BeforeResolution(t *testing.T) {
+func TestForbiddenRequestedRouteReturns403AcrossPublicEndpoints(t *testing.T) {
 	gw, db, keys := newPublicModelsTestGateway(t, "restricted")
 	require.NoError(t, db.APIKeys().SetAllowedModels(context.Background(), keys[0].Record.ID, []string{"fast"}))
 
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(`{"model":"not-a-route","input":"hello"}`))
-	req.Header.Set("Authorization", "Bearer "+keys[0].Plaintext)
-	gw.Handler().ServeHTTP(rec, req)
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{"chat", "/v1/chat/completions", `{"model":"not-a-route","messages":[{"role":"user","content":"hello"}]}`},
+		{"responses", "/v1/responses", `{"model":"not-a-route","input":"hello"}`},
+		{"gemini", "/v1beta/models/not-a-route:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`},
+		{"embeddings", "/v1/embeddings", `{"model":"not-a-route","input":"hello"}`},
+		{"images", "/v1/images/generations", `{"model":"not-a-route","prompt":"hello"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(tt.body))
+			req.Header.Set("Authorization", "Bearer "+keys[0].Plaintext)
+			req.Header.Set("Content-Type", "application/json")
+			gw.Handler().ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+			require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+			require.Contains(t, rec.Body.String(), "not permitted")
+		})
+	}
 }
 
 func TestMediaOptionsUnrestrictedKeyStillResolves(t *testing.T) {

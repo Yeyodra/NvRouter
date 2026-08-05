@@ -44,14 +44,20 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if s.aliases != nil {
-		if aliases, err := s.aliases.List(r.Context()); err == nil {
+		aliases, err := s.aliases.List(r.Context())
+		if err != nil {
+			s.log.Warn("public model aliases unavailable", "err", err)
+		} else {
 			for _, alias := range aliases {
 				appendVisibleRoute(alias.Alias)
 			}
 		}
 	}
 	if s.chains != nil {
-		if chains, err := s.chains.ListByTenant(r.Context(), tenantOf(key)); err == nil {
+		chains, err := s.chains.ListByTenant(r.Context(), tenantOf(key))
+		if err != nil {
+			s.log.Warn("public model chains unavailable", "err", err)
+		} else {
 			for _, chain := range chains {
 				appendVisibleRoute(chain.Name)
 			}
