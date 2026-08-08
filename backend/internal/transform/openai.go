@@ -450,6 +450,13 @@ func renderOAIRequestForProvider(req *core.ChatRequest, providerID string, scope
 		// own fixes above; this path handles the rest without duplicating
 		// provider-specific hacks.
 		applyGenericReasoningConfig(out, req)
+	} else if !stripsStandardReasoningEffort(providerID) {
+		// Any other OpenAI-compatible provider: forward the client's
+		// reasoning_effort verbatim (it is a standard field) so it is not
+		// silently dropped for reasoning models we don't hardcode. The
+		// non-standard `thinking` object is deliberately not injected here,
+		// since providers that don't understand it return 400.
+		applyStandardReasoningEffort(out, req)
 	}
 	if providerID == "codebuddy" {
 		applyCodebuddyRequestFixes(out, req)
@@ -542,6 +549,39 @@ func applyCodebuddyRequestFixes(out *oaiRequest, req *core.ChatRequest) {
 			out.ExtraBody = map[string]any{}
 		}
 		out.ExtraBody["reasoning_summary"] = "auto"
+	}
+}
+
+// stripsStandardReasoningEffort lists OpenAI-compatible providers whose standard
+// chat endpoint rejects a reasoning_effort field on non-reasoning models (or
+// route reasoning models through a separate API). Their reasoning_effort is
+// dropped rather than forwarded; reasoning models on these providers get effort
+// through their dedicated path (e.g. the OpenAI Responses codec), not here.
+func stripsStandardReasoningEffort(providerID string) bool {
+	switch providerID {
+	case "openai", "groq":
+		return true
+	}
+	return false
+}
+
+// applyStandardReasoningEffort forwards only the standard OpenAI
+// reasoning_effort field for generic OpenAI-compatible providers not covered by
+// a hardcoded reasoning scope. Absent reasoning stays absent; explicit
+// off/none/disabled is omitted (empty reasoning_effort). "xhigh" maps to the
+// documented "max" ceiling. The non-standard `thinking` object is never set
+// here — that is reserved for providers proven to accept it.
+func applyStandardReasoningEffort(out *oaiRequest, req *core.ChatRequest) {
+	if req.Reasoning == nil {
+		return
+	}
+	switch effort := strings.ToLower(req.Reasoning.Effort); effort {
+	case "none", "off", "disabled", "", "auto", "adaptive":
+		out.ReasoningEffort = ""
+	case "xhigh":
+		out.ReasoningEffort = "max"
+	default:
+		out.ReasoningEffort = effort
 	}
 }
 
@@ -861,8 +901,13 @@ type oaiResponse struct {
 			Role    string `json:"role"`
 			Content string `json:"content"`
 			// ReasoningContent carries thinking/reasoning text from models
-			// that expose it as a structured field (DeepSeek, some MiMo).
+			// that expose it as a structured field. Providers disagree on the
+			// name: DeepSeek/MiMo use reasoning_content, OpenRouter uses
+			// reasoning, a few use reasoning_text. Precedence when several are
+			// present: reasoning_content > reasoning > reasoning_text.
 			ReasoningContent string        `json:"reasoning_content"`
+			Reasoning        string        `json:"reasoning"`
+			ReasoningText    string        `json:"reasoning_text"`
 			ToolCalls        []oaiToolCall `json:"tool_calls"`
 		} `json:"message"`
 		FinishReason string `json:"finish_reason"`
@@ -911,7 +956,7 @@ func (OpenAICodec) buildResponse(raw oaiResponse, model string) (*core.ChatRespo
 
 	// Extract thinking content: prefer structured reasoning_content field,
 	// fall back to <think> tag extraction from content.
-	thinkingText := choice.Message.ReasoningContent
+	thinkingText := firstNonEmpty(choice.Message.ReasoningContent, choice.Message.Reasoning, choice.Message.ReasoningText)
 	contentText := choice.Message.Content
 	if thinkingText == "" && contentText != "" {
 		thinkingChunks, clean := StripThinkTags(contentText)

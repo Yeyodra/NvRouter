@@ -18,9 +18,13 @@ type oaiStreamChunk struct {
 			Role    string `json:"role"`
 			Content string `json:"content"`
 			// ReasoningContent carries thinking/reasoning text from models
-			// that expose it as a structured field (DeepSeek, some MiMo
-			// versions). The JSON field name varies by provider.
+			// that expose it as a structured field. The name varies by
+			// provider: reasoning_content (DeepSeek/MiMo), reasoning
+			// (OpenRouter), reasoning_text (a few others). Precedence:
+			// reasoning_content > reasoning > reasoning_text.
 			ReasoningContent string              `json:"reasoning_content"`
+			Reasoning        string              `json:"reasoning"`
+			ReasoningText    string              `json:"reasoning_text"`
 			ToolCalls        []oaiStreamToolCall `json:"tool_calls"`
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
@@ -62,9 +66,9 @@ func (OpenAICodec) ParseStreamLine(line []byte, model string) ([]core.StreamChun
 	var chunks []core.StreamChunk
 	if len(raw.Choices) > 0 {
 		c := raw.Choices[0]
-		// Structured reasoning_content field (DeepSeek, some MiMo).
-		if c.Delta.ReasoningContent != "" {
-			chunks = append(chunks, core.StreamChunk{Type: core.ChunkThinking, Delta: c.Delta.ReasoningContent})
+		// Structured reasoning field under any of its provider-specific names.
+		if rc := firstNonEmpty(c.Delta.ReasoningContent, c.Delta.Reasoning, c.Delta.ReasoningText); rc != "" {
+			chunks = append(chunks, core.StreamChunk{Type: core.ChunkThinking, Delta: rc})
 		}
 		if c.Delta.Content != "" {
 			chunks = append(chunks, core.StreamChunk{Type: core.ChunkText, Delta: c.Delta.Content})
