@@ -457,7 +457,13 @@ func scanEnterAnthropicSSE(ctx context.Context, model string, resp *http.Respons
 			}
 		}
 		if err := scanner.Err(); err != nil {
-			sendStreamError(ctx, out, core.ErrTimeout, enterProvider, model, err)
+			kind := core.ErrUpstream
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				kind = core.ErrTimeout
+			} else if strings.Contains(strings.ToLower(err.Error()), "token too long") {
+				kind = core.ErrResponseIntegrity
+			}
+			sendStreamError(ctx, out, kind, enterProvider, model, err)
 			return
 		}
 		if !terminalSeen {

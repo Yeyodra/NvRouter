@@ -1,8 +1,10 @@
 package connectors
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mydisha/keirouter/backend/internal/core"
+	"github.com/mydisha/keirouter/backend/internal/transform"
 )
 
 func enterTestRequest(model string) *core.ChatRequest {
@@ -124,6 +127,14 @@ func TestEnterClaudeStreamsNativeMessages(t *testing.T) {
 	if text != "hi" || !finished {
 		t.Fatalf("text = %q, finished = %v", text, finished)
 	}
+}
+
+func TestEnterClaudeRejectsOversizedSSEAsResponseIntegrity(t *testing.T) {
+	payload := append([]byte("data: "), bytes.Repeat([]byte("x"), 2*1024*1024+1)...)
+	payload = append(payload, '\n')
+	resp := &http.Response{Body: io.NopCloser(bytes.NewReader(payload))}
+	stream := scanEnterAnthropicSSE(context.Background(), "claude-opus-5", resp, transform.AnthropicCodec{}, core.StreamConfig{})
+	assertEnterStreamIntegrityError(t, stream)
 }
 
 func TestEnterClaudeRejectsStreamWithoutMessageStop(t *testing.T) {
