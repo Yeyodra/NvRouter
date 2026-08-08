@@ -8,6 +8,42 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestAnthropicParseResponsePreservesThinkingSignature(t *testing.T) {
+	resp, err := (AnthropicCodec{}).ParseResponse([]byte(`{"content":[{"type":"thinking","thinking":"reasoning","signature":"sig_123"}],"stop_reason":"end_turn"}`), "claude")
+	require.NoError(t, err)
+	require.Len(t, resp.Message.Content, 1)
+	require.Equal(t, core.PartThinking, resp.Message.Content[0].Type)
+	require.Equal(t, "reasoning", resp.Message.Content[0].Text)
+	require.Equal(t, "sig_123", resp.Message.Content[0].Signature)
+}
+
+func TestAnthropicParseStreamSignatureDelta(t *testing.T) {
+	chunks, err := (AnthropicCodec{}).ParseStreamLine([]byte(`{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_stream"}}`), "claude")
+	require.NoError(t, err)
+	require.Len(t, chunks, 1)
+	require.Equal(t, core.ChunkThinking, chunks[0].Type)
+	require.Empty(t, chunks[0].Delta)
+	require.Equal(t, "sig_stream", chunks[0].Signature)
+}
+
+func TestAnthropicRenderStreamThinkingSignatureDelta(t *testing.T) {
+	state := &StreamState{}
+	var rendered string
+	for _, chunk := range []core.StreamChunk{
+		{Type: core.ChunkThinking, Delta: "reasoning"},
+		{Type: core.ChunkThinking, Signature: "sig_stream"},
+	} {
+		events, err := (AnthropicCodec{}).RenderStreamChunk(chunk, state)
+		require.NoError(t, err)
+		for _, event := range events {
+			rendered += string(event)
+		}
+	}
+	require.Contains(t, rendered, `"type":"thinking_delta"`)
+	require.Contains(t, rendered, `"type":"signature_delta"`)
+	require.Contains(t, rendered, `"signature":"sig_stream"`)
+}
+
 func TestAnthropic_ThinkingBudgetReconciliation(t *testing.T) {
 	// When thinking budget >= max_tokens, max_tokens must be raised to budget+1024.
 	budget := 8000

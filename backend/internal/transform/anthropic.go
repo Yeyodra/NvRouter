@@ -481,7 +481,7 @@ func (AnthropicCodec) ParseResponse(body []byte, model string) (*core.ChatRespon
 		case "text":
 			msg.Content = append(msg.Content, core.ContentPart{Type: core.PartText, Text: b.Text})
 		case "thinking":
-			msg.Content = append(msg.Content, core.ContentPart{Type: core.PartThinking, Text: b.Text})
+			msg.Content = append(msg.Content, core.ContentPart{Type: core.PartThinking, Text: b.Thinking, Signature: b.Signature})
 		case "tool_use":
 			msg.Content = append(msg.Content, core.ContentPart{
 				Type:     core.PartToolCall,

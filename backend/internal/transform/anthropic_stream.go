@@ -26,6 +26,7 @@ type antStreamEvent struct {
 		Text        string `json:"text"`
 		Thinking    string `json:"thinking"`
 		PartialJSON string `json:"partial_json"`
+		Signature   string `json:"signature"`
 		StopReason  string `json:"stop_reason"`
 	} `json:"delta"`
 	ContentBlock struct {
@@ -98,6 +99,8 @@ func (AnthropicCodec) ParseStreamLine(line []byte, _ string) ([]core.StreamChunk
 			return []core.StreamChunk{{Type: core.ChunkText, Delta: ev.Delta.Text}}, nil
 		case "thinking_delta":
 			return []core.StreamChunk{{Type: core.ChunkThinking, Delta: ev.Delta.Thinking}}, nil
+		case "signature_delta":
+			return []core.StreamChunk{{Type: core.ChunkThinking, Signature: ev.Delta.Signature}}, nil
 		case "input_json_delta":
 			return []core.StreamChunk{{
 				Type:             core.ChunkToolCall,
@@ -276,11 +279,20 @@ func (AnthropicCodec) RenderStreamChunk(chunk core.StreamChunk, state *StreamSta
 			}))
 		}
 		thinkIdx, _ := state.Custom["thinking_index"].(int)
-		events = append(events, antEvent("content_block_delta", map[string]any{
-			"type":  "content_block_delta",
-			"index": thinkIdx,
-			"delta": map[string]any{"type": "thinking_delta", "thinking": chunk.Delta},
-		}))
+		if chunk.Signature != "" {
+			events = append(events, antEvent("content_block_delta", map[string]any{
+				"type":  "content_block_delta",
+				"index": thinkIdx,
+				"delta": map[string]any{"type": "signature_delta", "signature": chunk.Signature},
+			}))
+		}
+		if chunk.Delta != "" {
+			events = append(events, antEvent("content_block_delta", map[string]any{
+				"type":  "content_block_delta",
+				"index": thinkIdx,
+				"delta": map[string]any{"type": "thinking_delta", "thinking": chunk.Delta},
+			}))
+		}
 
 	case core.ChunkToolCall:
 		if chunk.ToolCall != nil && len(chunk.ToolCall.Arguments) > 0 &&
