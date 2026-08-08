@@ -47,6 +47,162 @@ func TestEnterCanonicalModelUsesNativeUpstreamID(t *testing.T) {
 	}
 }
 
+func TestEnterClaudeUsesNativeMessagesTransport(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/messages" {
+			t.Fatalf("path = %q, want /messages", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer ek_test" || r.Header.Get("X-Workspace-ID") != "ws" || r.Header.Get("anthropic-version") != "2023-06-01" {
+			t.Fatalf("unexpected headers: %v", r.Header)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["model"] != "anthropic/claude-opus-4.8" || body["max_tokens"] != float64(42) || body["top_p"] != 0.8 {
+			t.Fatalf("body = %v", body)
+		}
+		if _, ok := body["temperature"]; ok {
+			t.Fatalf("Opus request retained unsupported temperature: %v", body)
+		}
+		thinking, _ := body["thinking"].(map[string]any)
+		if thinking["type"] != "enabled" {
+			t.Fatalf("thinking = %v", body["thinking"])
+		}
+		tools, _ := body["tools"].([]any)
+		if len(tools) != 1 {
+			t.Fatalf("tools = %v", body["tools"])
+		}
+		_, _ = w.Write([]byte(`{"type":"message","role":"assistant","model":"claude-opus-4-8","content":[{"type":"tool_use","id":"tool-1","name":"lookup","input":{"q":1}}],"stop_reason":"tool_use","usage":{"input_tokens":5,"output_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	c := NewEnterConverge(server.URL)
+	resp, err := c.Chat(context.Background(), enterTestRequest("claude-opus-4.8"), core.Credentials{APIKey: "ek_test", Extra: map[string]string{"workspace_id": "ws"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tool *core.ToolCall
+	for _, part := range resp.Message.Content {
+		if part.ToolCall != nil {
+			tool = part.ToolCall
+			break
+		}
+	}
+	if resp.Model != "claude-opus-4.8" || tool == nil || tool.Name != "lookup" {
+		t.Fatalf("response = %+v", resp)
+	}
+}
+
+func TestEnterClaudeStreamsNativeMessages(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/messages" {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"internal-route\",\"usage\":{\"input_tokens\":1}}}\n\n"))
+		_, _ = w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n"))
+		_, _ = w.Write([]byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n"))
+		_, _ = w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer server.Close()
+
+	stream, err := NewEnterConverge(server.URL).Stream(context.Background(), enterTestRequest("claude-opus-5"), core.Credentials{APIKey: "ek_test", Extra: map[string]string{"workspace_id": "ws"}}, core.StreamConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var text string
+	var finished bool
+	for chunk := range stream {
+		if chunk.Type == core.ChunkText {
+			text += chunk.Delta
+		}
+		if chunk.Type == core.ChunkFinish {
+			finished = true
+		}
+	}
+	if text != "hi" || !finished {
+		t.Fatalf("text = %q, finished = %v", text, finished)
+	}
+}
+
+func TestEnterClaudeRejectsStreamWithoutMessageStop(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"))
+	}))
+	defer server.Close()
+
+	stream, err := NewEnterConverge(server.URL).Stream(context.Background(), enterTestRequest("claude-opus-5"), core.Credentials{APIKey: "ek_test", Extra: map[string]string{"workspace_id": "ws"}}, core.StreamConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEnterStreamIntegrityError(t, stream)
+}
+
+func TestEnterClaudeRejectsContentAfterMessageStop(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"late\"}}\n\n"))
+	}))
+	defer server.Close()
+
+	stream, err := NewEnterConverge(server.URL).Stream(context.Background(), enterTestRequest("claude-opus-5"), core.Credentials{APIKey: "ek_test", Extra: map[string]string{"workspace_id": "ws"}}, core.StreamConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEnterStreamIntegrityError(t, stream)
+}
+
+func TestEnterClaudeRejectsContentAfterStopReason(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"late\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer server.Close()
+
+	stream, err := NewEnterConverge(server.URL).Stream(context.Background(), enterTestRequest("claude-opus-5"), core.Credentials{APIKey: "ek_test", Extra: map[string]string{"workspace_id": "ws"}}, core.StreamConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEnterStreamIntegrityError(t, stream)
+}
+
+func TestEnterClaudeRejectsMessageStopWithoutStopReason(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer server.Close()
+
+	stream, err := NewEnterConverge(server.URL).Stream(context.Background(), enterTestRequest("claude-opus-5"), core.Credentials{APIKey: "ek_test", Extra: map[string]string{"workspace_id": "ws"}}, core.StreamConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEnterStreamIntegrityError(t, stream)
+}
+
+func assertEnterStreamIntegrityError(t *testing.T, stream <-chan core.StreamChunk) {
+	t.Helper()
+	var gotErr error
+	var finished bool
+	for chunk := range stream {
+		if chunk.Type == core.ChunkError {
+			gotErr = chunk.Err
+		}
+		if chunk.Type == core.ChunkFinish {
+			finished = true
+		}
+	}
+	if gotErr == nil || core.AsProviderError(gotErr).Kind != core.ErrResponseIntegrity || finished {
+		t.Fatalf("error = %v, finished = %v", gotErr, finished)
+	}
+}
+
 func TestEnterWorkspaceResolutionHeadersCacheAndValidation(t *testing.T) {
 	var workspaces int32
 	var server *httptest.Server

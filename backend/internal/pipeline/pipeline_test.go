@@ -5,7 +5,14 @@ import (
 	"time"
 
 	"github.com/mydisha/keirouter/backend/internal/core"
+	"github.com/stretchr/testify/require"
 )
+
+func TestProviderAllowsDirectStreamVisibleReasoning(t *testing.T) {
+	require.False(t, providerAllowsDirectStream("grok-cli"), "Grok output must pass through the channel path to project tagged summaries as thinking")
+	require.False(t, providerAllowsDirectStream("enter-converge"), "Enter switches wire dialect by model, so raw SSE cannot be assumed to match the connector dialect")
+	require.True(t, providerAllowsDirectStream("openai"))
+}
 
 func TestShouldRetryStreamRateLimit(t *testing.T) {
 	tests := []struct {

@@ -55,7 +55,9 @@ var providerModels = map[string][]ModelSpec{
 	"enter-converge": {
 		m("gpt-5.6-sol", "GPT 5.6 Sol"), m("gpt-5.6-terra", "GPT 5.6 Terra"), m("gpt-5.6-luna", "GPT 5.6 Luna"),
 		m("gpt-5.5", "GPT 5.5"), m("gpt-5.4-pro", "GPT 5.4 Pro"), m("gpt-5.4", "GPT 5.4"), m("gpt-5.2-pro", "GPT 5.2 Pro"),
-		m("claude-opus-4.6", "Claude Opus 4.6"), m("claude-sonnet-4.5", "Claude Sonnet 4.5"),
+		m("claude-opus-5", "Claude Opus 5"), m("claude-sonnet-5", "Claude Sonnet 5"),
+		m("claude-opus-4.8", "Claude Opus 4.8"), m("claude-opus-4.7", "Claude Opus 4.7"), m("claude-opus-4.6", "Claude Opus 4.6"),
+		m("claude-sonnet-4.6", "Claude Sonnet 4.6"), m("claude-sonnet-4.5", "Claude Sonnet 4.5"),
 		m("minimax-m3", "MiniMax M3"), m("minimax-m2.7", "MiniMax M2.7"), m("minimax-m2.5", "MiniMax M2.5"),
 		m("deepseek-v4-pro", "DeepSeek V4 Pro"),
 		m("qwen-3.7-plus", "Qwen 3.7 Plus"), m("qwen-3.7-max", "Qwen 3.7 Max Preview"), m("qwen-3.6-plus", "Qwen 3.6 Plus"), m("qwen-3.6-max-preview", "Qwen 3.6 Max Preview"),

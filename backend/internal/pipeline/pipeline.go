@@ -38,6 +38,10 @@ import (
 	"github.com/mydisha/keirouter/backend/internal/transform"
 )
 
+func providerAllowsDirectStream(provider string) bool {
+	return provider != "grok-cli" && provider != "enter-converge"
+}
+
 // TimeoutReader provides dynamic timeout values that can be updated at runtime.
 type TimeoutReader interface {
 	StreamStallTimeout() time.Duration
@@ -717,7 +721,7 @@ func (p *Pipeline) streamExec(ctx context.Context, req *core.ChatRequest, opts O
 		// omits one. Raw byte piping can't inject a synthetic event, so we trade
 		// the zero-copy throughput for correct usage accounting on these opt-in
 		// requests.
-		if len(attemptReq.Tools) == 0 && !req.IncludeUsage && req.Metadata.SourceDialect == attempt.Conn.Dialect() {
+		if providerAllowsDirectStream(attempt.Target.Provider) && len(attemptReq.Tools) == 0 && !req.IncludeUsage && req.Metadata.SourceDialect == attempt.Conn.Dialect() {
 			if ds, ok := attempt.Conn.(core.DirectStreamable); ok {
 				body, _, rawErr := ds.StreamRaw(callCtx, attemptReq, attempt.Creds, streamCfg)
 				if rawErr != nil {

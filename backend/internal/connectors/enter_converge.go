@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -26,10 +27,9 @@ const (
 var enterNativeModels = map[string]string{
 	"gpt-5.6-sol": "openai/gpt-5.6-sol", "gpt-5.6-terra": "openai/gpt-5.6-terra", "gpt-5.6-luna": "openai/gpt-5.6-luna",
 	"gpt-5.5": "openai/gpt-5.5", "gpt-5.4-pro": "openai/gpt-5.4-pro", "gpt-5.4": "openai/gpt-5.4", "gpt-5.2-pro": "openai/gpt-5.2-pro",
+	"claude-opus-5": "anthropic/claude-opus-5", "claude-sonnet-5": "anthropic/claude-sonnet-5",
+	"claude-opus-4.8": "anthropic/claude-opus-4.8", "claude-opus-4.7": "anthropic/claude-opus-4.7", "claude-sonnet-4.6": "anthropic/claude-sonnet-4.6",
 	"claude-opus-4.6": "anthropic/claude-opus-4.6", "claude-sonnet-4.5": "anthropic/claude-sonnet-4.5",
-	// Legacy lock-only IDs remain mapped for migration/import/export compatibility;
-	// they are intentionally absent from the active Enter catalog.
-	"claude-opus-4.8": "anthropic/claude-opus-4.8", "claude-sonnet-5": "anthropic/claude-sonnet-5",
 	"minimax-m3": "minimax/minimax-m3", "minimax-m2.7": "minimax/minimax-m2.7", "minimax-m2.5": "minimax/minimax-m2.5",
 	"deepseek-v4-pro": "deepseek/deepseek-v4-pro",
 	"qwen-3.7-plus":   "alibaba/qwen-3.7-plus", "qwen-3.7-max": "alibaba/qwen-3.7-max", "qwen-3.6-plus": "alibaba/qwen-3.6-plus", "qwen-3.6-max-preview": "alibaba/qwen-3.6-max-preview",
@@ -71,6 +71,7 @@ type enterWorkspaceCacheEntry struct {
 type EnterConverge struct {
 	base       string
 	codec      transform.OpenAICodec
+	antCodec   transform.AnthropicCodec
 	cacheMu    sync.Mutex
 	workspaces map[string]enterWorkspaceCacheEntry
 }
@@ -94,6 +95,17 @@ func (c *EnterConverge) headers(creds core.Credentials, workspace string) map[st
 		h["X-Workspace-ID"] = workspace
 	}
 	return mergeHeaders(h, creds.Headers)
+}
+
+func enterUsesMessages(model string) bool {
+	model = strings.ToLower(EnterNativeModelID(model))
+	return strings.HasPrefix(model, "anthropic/claude-")
+}
+
+func (c *EnterConverge) messageHeaders(creds core.Credentials, workspace string) map[string]string {
+	h := c.headers(creds, workspace)
+	h["anthropic-version"] = anthropicVersion
+	return h
 }
 
 func enterStoredWorkspace(creds core.Credentials) string {
@@ -165,6 +177,21 @@ func (c *EnterConverge) workspace(ctx context.Context, creds core.Credentials) (
 	c.workspaces[creds.APIKey] = enterWorkspaceCacheEntry{id: id, expires: time.Now().Add(30 * time.Minute)}
 	c.cacheMu.Unlock()
 	return id, nil
+}
+
+func cloneEnterAnthropicRequest(req *core.ChatRequest) *core.ChatRequest {
+	clone := *req
+	clone.Messages = append([]core.Message(nil), req.Messages...)
+	for i := range clone.Messages {
+		clone.Messages[i].Content = append([]core.ContentPart(nil), req.Messages[i].Content...)
+		for j := range clone.Messages[i].Content {
+			if media := clone.Messages[i].Content[j].Media; media != nil {
+				copy := *media
+				clone.Messages[i].Content[j].Media = &copy
+			}
+		}
+	}
+	return &clone
 }
 
 func cloneEnterRequest(req *core.ChatRequest) *core.ChatRequest {
@@ -307,6 +334,31 @@ func waitEnterRetry(ctx context.Context, attempt int) error {
 }
 
 func (c *EnterConverge) Chat(ctx context.Context, req *core.ChatRequest, creds core.Credentials) (*core.ChatResponse, error) {
+	if enterUsesMessages(req.Model) {
+		workspace, err := c.workspace(ctx, creds)
+		if err != nil {
+			return nil, err
+		}
+		clone := cloneEnterAnthropicRequest(req)
+		clone.Model = EnterNativeModelID(req.Model)
+		clone.Stream = false
+		if err := c.prefetchImages(ctx, clone, creds); err != nil {
+			return nil, &core.ProviderError{Kind: core.ErrBadRequest, Scope: core.FailureScopeRequest, Provider: enterProvider, Model: req.Model, Message: err.Error(), Cause: err}
+		}
+		body, err := c.antCodec.RenderRequest(clone)
+		if err != nil {
+			return nil, err
+		}
+		response, err := doJSON(core.WithProxy(ctx, creds), enterProvider, req.Model, joinURL(c.base, "messages"), body, c.messageHeaders(creds, workspace))
+		if err != nil {
+			return nil, enterError(err, req.Model)
+		}
+		resp, err := c.antCodec.ParseResponse(response, req.Model)
+		if resp != nil {
+			resp.Model = req.Model
+		}
+		return resp, err
+	}
 	body, workspace, err := c.prepare(ctx, req, creds, false)
 	if err != nil {
 		return nil, err
@@ -351,7 +403,101 @@ func (c *EnterConverge) openStream(ctx context.Context, req *core.ChatRequest, c
 	return nil, err
 }
 
+func scanEnterAnthropicSSE(ctx context.Context, model string, resp *http.Response, codec transform.AnthropicCodec, cfg core.StreamConfig) <-chan core.StreamChunk {
+	out := make(chan core.StreamChunk, 16)
+	go func() {
+		defer close(out)
+		defer resp.Body.Close()
+		ttft := newTTFTTracker(cfg)
+		terminalSeen := false
+		finishSeen := false
+		var pendingFinish *core.StreamChunk
+		scanner := sseScanner(resp.Body)
+		for scanner.Scan() {
+			payload, ok := parseSSEData(scanner.Text())
+			if !ok {
+				continue
+			}
+			var envelope struct {
+				Type string `json:"type"`
+			}
+			if err := json.Unmarshal([]byte(payload), &envelope); err != nil {
+				sendStreamParseError(ctx, out, enterProvider, model, err)
+				return
+			}
+			if terminalSeen {
+				sendStreamError(ctx, out, core.ErrResponseIntegrity, enterProvider, model, errors.New("provider sent content after message_stop"))
+				return
+			}
+			if finishSeen && envelope.Type != "message_stop" {
+				sendStreamError(ctx, out, core.ErrResponseIntegrity, enterProvider, model, errors.New("provider sent content after stop reason"))
+				return
+			}
+			if envelope.Type == "message_stop" {
+				terminalSeen = true
+			}
+			chunks, err := codec.ParseStreamLine([]byte(payload), model)
+			if err != nil {
+				sendStreamParseError(ctx, out, enterProvider, model, err)
+				return
+			}
+			for _, chunk := range chunks {
+				if chunk.Type == core.ChunkFinish {
+					finish := chunk
+					pendingFinish = &finish
+					finishSeen = true
+					continue
+				}
+				ttft.maybeReport(chunk)
+				select {
+				case out <- chunk:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			sendStreamError(ctx, out, core.ErrTimeout, enterProvider, model, err)
+			return
+		}
+		if !terminalSeen {
+			sendStreamError(ctx, out, core.ErrResponseIntegrity, enterProvider, model, errors.New("provider stream ended without message_stop"))
+			return
+		}
+		if pendingFinish == nil {
+			sendStreamError(ctx, out, core.ErrResponseIntegrity, enterProvider, model, errors.New("provider stream ended without stop reason"))
+			return
+		}
+		select {
+		case out <- *pendingFinish:
+		case <-ctx.Done():
+		}
+	}()
+	return out
+}
+
 func (c *EnterConverge) Stream(ctx context.Context, req *core.ChatRequest, creds core.Credentials, cfg core.StreamConfig) (<-chan core.StreamChunk, error) {
+	if enterUsesMessages(req.Model) {
+		workspace, err := c.workspace(ctx, creds)
+		if err != nil {
+			return nil, err
+		}
+		clone := cloneEnterAnthropicRequest(req)
+		clone.Model = EnterNativeModelID(req.Model)
+		clone.Stream = true
+		if err := c.prefetchImages(ctx, clone, creds); err != nil {
+			return nil, &core.ProviderError{Kind: core.ErrBadRequest, Scope: core.FailureScopeRequest, Provider: enterProvider, Model: req.Model, Message: err.Error(), Cause: err}
+		}
+		body, err := c.antCodec.RenderRequest(clone)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := openStreamWithClient(core.WithProxy(ctx, creds), enterProvider, req.Model, joinURL(c.base, "messages"), body, c.messageHeaders(creds, workspace), clientFor(creds))
+		if err != nil {
+			return nil, enterError(err, req.Model)
+		}
+		return scanEnterAnthropicSSE(ctx, req.Model, resp, c.antCodec, cfg), nil
+	}
 	resp, err := c.openStream(ctx, req, creds)
 	if err != nil {
 		return nil, err

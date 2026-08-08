@@ -22,17 +22,19 @@ func TestEnterConvergeCatalog(t *testing.T) {
 		t.Fatalf("unexpected Enter Converge spec: %+v ok=%v", spec, ok)
 	}
 	models := ModelsForProvider(spec.ID)
-	if len(models) != 24 {
-		t.Fatalf("Enter Converge models = %d, want 24", len(models))
+	if len(models) != 29 {
+		t.Fatalf("Enter Converge models = %d, want 29", len(models))
 	}
+	seen := map[string]bool{}
 	for _, model := range models {
+		seen[model.ID] = true
 		if strings.Contains(model.ID, "/") {
 			t.Fatalf("Enter canonical model must be bare, got %q", model.ID)
 		}
 	}
-	for _, model := range models {
-		if strings.Contains(model.ID, "claude-opus-4.8") || strings.Contains(model.ID, "claude-opus-4.7") || strings.Contains(model.ID, "claude-sonnet-5") || strings.Contains(model.ID, "claude-sonnet-4.6") || strings.HasPrefix(model.ID, "google/") {
-			t.Fatalf("JWT/project-chat model exposed: %q", model.ID)
+	for _, id := range []string{"claude-opus-5", "claude-sonnet-5", "claude-opus-4.8", "claude-opus-4.7", "claude-opus-4.6", "claude-sonnet-4.6", "claude-sonnet-4.5"} {
+		if !seen[id] {
+			t.Fatalf("live native Messages model missing: %q", id)
 		}
 	}
 	if _, err := DefaultRegistry().Get(spec.ID); err != nil {
