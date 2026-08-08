@@ -514,7 +514,11 @@ func (AnthropicCodec) RenderResponse(resp *core.ChatResponse) ([]byte, error) {
 		case core.PartText:
 			content = append(content, map[string]any{"type": "text", "text": p.Text})
 		case core.PartThinking:
-			content = append(content, map[string]any{"type": "thinking", "thinking": p.Text})
+			block := map[string]any{"type": "thinking", "thinking": p.Text}
+			if p.Signature != "" {
+				block["signature"] = p.Signature
+			}
+			content = append(content, block)
 		case core.PartToolCall:
 			content = append(content, map[string]any{
 				"type": "tool_use", "id": p.ToolCall.ID, "name": p.ToolCall.Name, "input": normalizeAntToolInputValue(p.ToolCall.Arguments),

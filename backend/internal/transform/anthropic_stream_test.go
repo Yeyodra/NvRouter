@@ -9,12 +9,21 @@ import (
 )
 
 func TestAnthropicParseResponsePreservesThinkingSignature(t *testing.T) {
-	resp, err := (AnthropicCodec{}).ParseResponse([]byte(`{"content":[{"type":"thinking","thinking":"reasoning","signature":"sig_123"}],"stop_reason":"end_turn"}`), "claude")
+	codec := AnthropicCodec{}
+	resp, err := codec.ParseResponse([]byte(`{"content":[{"type":"thinking","thinking":"reasoning","signature":"sig_123"}],"stop_reason":"end_turn"}`), "claude")
 	require.NoError(t, err)
 	require.Len(t, resp.Message.Content, 1)
 	require.Equal(t, core.PartThinking, resp.Message.Content[0].Type)
 	require.Equal(t, "reasoning", resp.Message.Content[0].Text)
 	require.Equal(t, "sig_123", resp.Message.Content[0].Signature)
+
+	rendered, err := codec.RenderResponse(resp)
+	require.NoError(t, err)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rendered, &body))
+	block := body["content"].([]any)[0].(map[string]any)
+	require.Equal(t, "reasoning", block["thinking"])
+	require.Equal(t, "sig_123", block["signature"])
 }
 
 func TestAnthropicParseStreamSignatureDelta(t *testing.T) {
