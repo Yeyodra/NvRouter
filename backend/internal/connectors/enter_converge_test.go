@@ -140,6 +140,33 @@ func TestEnterClaudeRejectsStreamWithoutMessageStop(t *testing.T) {
 	assertEnterStreamIntegrityError(t, stream)
 }
 
+func TestEnterClaudeAllowsNexusUsageAfterMessageStop(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"nexus_usage\",\"credits_used\":1}\n\n"))
+	}))
+	defer server.Close()
+
+	stream, err := NewEnterConverge(server.URL).Stream(context.Background(), enterTestRequest("claude-opus-5"), core.Credentials{APIKey: "ek_test", Extra: map[string]string{"workspace_id": "ws"}}, core.StreamConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var finished bool
+	for chunk := range stream {
+		if chunk.Type == core.ChunkError {
+			t.Fatalf("unexpected error: %v", chunk.Err)
+		}
+		if chunk.Type == core.ChunkFinish {
+			finished = true
+		}
+	}
+	if !finished {
+		t.Fatal("missing finish")
+	}
+}
+
 func TestEnterClaudeRejectsContentAfterMessageStop(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

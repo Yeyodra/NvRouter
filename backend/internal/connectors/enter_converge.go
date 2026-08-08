@@ -425,11 +425,11 @@ func scanEnterAnthropicSSE(ctx context.Context, model string, resp *http.Respons
 				sendStreamParseError(ctx, out, enterProvider, model, err)
 				return
 			}
-			if terminalSeen {
+			if terminalSeen && envelope.Type != "nexus_usage" {
 				sendStreamError(ctx, out, core.ErrResponseIntegrity, enterProvider, model, errors.New("provider sent content after message_stop"))
 				return
 			}
-			if finishSeen && envelope.Type != "message_stop" {
+			if finishSeen && envelope.Type != "message_stop" && envelope.Type != "nexus_usage" {
 				sendStreamError(ctx, out, core.ErrResponseIntegrity, enterProvider, model, errors.New("provider sent content after stop reason"))
 				return
 			}
