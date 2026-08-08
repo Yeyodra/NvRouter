@@ -69,8 +69,9 @@ func TestEnterClaudeUsesNativeMessagesTransport(t *testing.T) {
 			t.Fatalf("Opus request retained unsupported temperature: %v", body)
 		}
 		thinking, _ := body["thinking"].(map[string]any)
-		if thinking["type"] != "enabled" {
-			t.Fatalf("thinking = %v", body["thinking"])
+		outputConfig, _ := body["output_config"].(map[string]any)
+		if thinking["type"] != "adaptive" || outputConfig["effort"] != "high" {
+			t.Fatalf("thinking = %v, output_config = %v", body["thinking"], body["output_config"])
 		}
 		tools, _ := body["tools"].([]any)
 		if len(tools) != 1 {
