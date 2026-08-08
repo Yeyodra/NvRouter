@@ -130,6 +130,18 @@ func TestEnterClaudeStreamsNativeMessages(t *testing.T) {
 	}
 }
 
+func TestEnterClaudeForwardsUpstreamPing(t *testing.T) {
+	resp := &http.Response{Body: io.NopCloser(strings.NewReader("data: {\"type\":\"ping\"}\n\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n"))}
+	stream := scanEnterAnthropicSSE(context.Background(), "claude-opus-4.8", resp, transform.AnthropicCodec{}, core.StreamConfig{})
+
+	first, ok := <-stream
+	if !ok || first.Type != core.ChunkPing {
+		t.Fatalf("first chunk = %+v, open = %v; want ping", first, ok)
+	}
+	for range stream {
+	}
+}
+
 func TestEnterClaudeRejectsOversizedSSEAsResponseIntegrity(t *testing.T) {
 	payload := append([]byte("data: "), bytes.Repeat([]byte("x"), 2*1024*1024+1)...)
 	payload = append(payload, '\n')

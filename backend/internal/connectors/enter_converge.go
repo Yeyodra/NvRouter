@@ -436,6 +436,14 @@ func scanEnterAnthropicSSE(ctx context.Context, model string, resp *http.Respons
 			if envelope.Type == "message_stop" {
 				terminalSeen = true
 			}
+			if envelope.Type == "ping" {
+				select {
+				case out <- core.StreamChunk{Type: core.ChunkPing}:
+				case <-ctx.Done():
+					return
+				}
+				continue
+			}
 			chunks, err := codec.ParseStreamLine([]byte(payload), model)
 			if err != nil {
 				sendStreamParseError(ctx, out, enterProvider, model, err)
