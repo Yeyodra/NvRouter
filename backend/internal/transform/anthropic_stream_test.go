@@ -53,6 +53,28 @@ func TestAnthropicRenderStreamThinkingSignatureDelta(t *testing.T) {
 	require.Contains(t, rendered, `"signature":"sig_stream"`)
 }
 
+func TestAnthropic_AdaptiveEffortRoundTrip(t *testing.T) {
+	body := []byte(`{
+		"model": "claude-opus-4.8",
+		"max_tokens": 4096,
+		"thinking": {"type": "adaptive"},
+		"output_config": {"effort": "max"},
+		"messages": [{"role": "user", "content": "hi"}]
+	}`)
+
+	req, err := AnthropicCodec{}.ParseRequest(body)
+	require.NoError(t, err)
+	require.NotNil(t, req.Reasoning)
+	require.Equal(t, "max", req.Reasoning.Effort)
+
+	rendered, err := AnthropicCodec{}.RenderRequest(req)
+	require.NoError(t, err)
+	var out map[string]any
+	require.NoError(t, json.Unmarshal(rendered, &out))
+	require.Equal(t, "adaptive", out["thinking"].(map[string]any)["type"])
+	require.Equal(t, "max", out["output_config"].(map[string]any)["effort"])
+}
+
 func TestAnthropic_ThinkingBudgetReconciliation(t *testing.T) {
 	// When thinking budget >= max_tokens, max_tokens must be raised to budget+1024.
 	budget := 8000

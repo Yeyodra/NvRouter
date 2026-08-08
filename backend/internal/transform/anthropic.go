@@ -32,7 +32,12 @@ type antRequest struct {
 	// Claude Code send. It must be forwarded to Anthropic-compatible upstreams
 	// (e.g. GLM, Zhipu) or the model will not emit reasoning blocks, confusing
 	// clients that expect them.
-	Thinking json.RawMessage `json:"thinking,omitempty"`
+	Thinking     json.RawMessage  `json:"thinking,omitempty"`
+	OutputConfig *antOutputConfig `json:"output_config,omitempty"`
+}
+
+type antOutputConfig struct {
+	Effort string `json:"effort,omitempty"`
 }
 
 type antMessage struct {
@@ -106,8 +111,14 @@ func (AnthropicCodec) ParseRequest(body []byte) (*core.ChatRequest, error) {
 		req.Messages = append(req.Messages, parseAntMessage(m))
 	}
 
-	// Parse thinking configuration from the raw body (before unmarshaling)
+	// Parse thinking configuration from the raw body (before unmarshaling).
 	req.Reasoning = parseAntThinkingFromBytes(body)
+	if raw.OutputConfig != nil && strings.TrimSpace(raw.OutputConfig.Effort) != "" {
+		if req.Reasoning == nil {
+			req.Reasoning = &core.ReasoningConfig{}
+		}
+		req.Reasoning.Effort = strings.ToLower(strings.TrimSpace(raw.OutputConfig.Effort))
+	}
 
 	return req, nil
 }
@@ -304,6 +315,13 @@ func (AnthropicCodec) RenderRequest(req *core.ChatRequest) ([]byte, error) {
 		switch effort {
 		case "adaptive", "auto":
 			thinking = map[string]any{"type": "adaptive"}
+		case "low", "medium", "high", "xhigh", "max":
+			if thinkingBudget > 0 {
+				thinking = map[string]any{"type": "enabled"}
+			} else {
+				thinking = map[string]any{"type": "adaptive"}
+				out.OutputConfig = &antOutputConfig{Effort: effort}
+			}
 		case "", "none", "off", "disabled":
 			if thinkingBudget > 0 {
 				thinking = map[string]any{"type": "enabled"}
